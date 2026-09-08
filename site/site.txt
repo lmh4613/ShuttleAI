@@ -1,0 +1,11 @@
+Kakao Developers (developers.kakao.com)
+
+용도: 카카오 앱 등록, REST API 키 발급, 카카오 로그인(OAuth) 설정, 카카오톡 메시지 전송 API 연동
+
+공공데이터포털 (www.data.go.kr)
+
+용도: 기상청 단기예보 및 초단기예보 조회 서비스 신청 및 인증키(KMA_API_KEY) 발급·관리
+
+Google AI Studio (aistudio.google.com)
+
+용도: 셔틀버스 날씨 맞춤형 AI 코멘트 생성을 위한 Gemini API 키(GEMINI_API_KEY) 발급 및 관리

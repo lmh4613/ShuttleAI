@@ -1,0 +1,8 @@
+streamlit
+pandas
+requests
+python-dotenv
+google-genai
+google-generativeai
+python-pptx
+pdf2image
