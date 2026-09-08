@@ -9,13 +9,26 @@ import time
 from datetime import datetime, timedelta
 import weather_api
 import ppt_parser
+from dotenv import load_dotenv
+
+load_dotenv()
 
 st.set_page_config(page_title="AI 셔틀버스 날씨 알림", page_icon="🚌", layout="wide")
 
-# 카카오 API 설정 정보
-KAKAO_CLIENT_ID = os.getenv("KAKAO_CLIENT_ID", "")
-KAKAO_CLIENT_SECRET = os.getenv("KAKAO_CLIENT_SECRET", "")
-KAKAO_REDIRECT_URI = os.getenv("KAKAO_REDIRECT_URI", "http://localhost:8501")
+def get_env_variable(var_name, default=""):
+    """환경 변수를 os.getenv에서 먼저 찾고, 없으면 st.secrets에서 가져옵니다."""
+    val = os.getenv(var_name)
+    if not val:
+        try:
+            val = st.secrets.get(var_name)
+        except Exception:
+            val = None
+    return val if val is not None else default
+
+# 카카오 API 설정 정보 (로컬 .env 및 Streamlit Cloud st.secrets 호환)
+KAKAO_CLIENT_ID = get_env_variable("KAKAO_CLIENT_ID", "")
+KAKAO_CLIENT_SECRET = get_env_variable("KAKAO_CLIENT_SECRET", "")
+KAKAO_REDIRECT_URI = get_env_variable("KAKAO_REDIRECT_URI", "http://localhost:8501")
 
 USER_SETTINGS_FILE = "user_settings.json"
 
@@ -85,7 +98,7 @@ def send_kakao_memo(access_token, title, description):
     template_object = {
         "object_type": "text",
         "text": f"[AI 셔틀버스 탑승·하차 통합 안내]\n\n{title}\n\n{description}",
-        "link": {"web_url": "http://localhost:8501", "mobile_web_url": "http://localhost:8501"},
+        "link": {"web_url": KAKAO_REDIRECT_URI, "mobile_web_url": KAKAO_REDIRECT_URI},
         "button_title": "앱 열기"
     }
     payload = {"template_object": json.dumps(template_object)}
@@ -169,7 +182,6 @@ def notification_background_worker():
                 if not isinstance(entry, dict):
                     continue
                 
-                # 공통 알림 조건 확인 (발송 요일 및 공휴일 체크)
                 notif_config = entry.get("notification_config", {"active_days": ["월", "화", "수", "목", "금"], "exclude_holidays": True})
                 active_days = notif_config.get("active_days", ["월", "화", "수", "목", "금"])
                 exclude_holidays = notif_config.get("exclude_holidays", True)
@@ -567,7 +579,6 @@ with main_tab_target:
         st.divider()
         st.subheader("⭐ 내 통합 즐겨찾기 및 알림 설정 목록")
         if st.session_state["user_info"]:
-            # 통합 알림 공통 설정 영역 (발송 요일 + 공휴일 제외)
             with st.expander("⚙️ 자동 알림 공통 조건 설정 (발송 요일 및 공휴일)", expanded=True):
                 notif_config = user_data_obj.get("notification_config", {"active_days": ["월", "화", "수", "목", "금"], "exclude_holidays": True})
                 current_active_days = notif_config.get("active_days", ["월", "화", "수", "목", "금"])

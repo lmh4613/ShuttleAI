@@ -2,6 +2,7 @@ import os
 import json
 import io
 import re
+import streamlit as st
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
@@ -13,7 +14,13 @@ load_dotenv()
 def get_gemini_client():
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
-        raise ValueError(".env 파일에 GEMINI_API_KEY가 설정되어 있지 않습니다.")
+        try:
+            api_key = st.secrets.get("GEMINI_API_KEY")
+        except Exception:
+            api_key = None
+            
+    if not api_key:
+        raise ValueError(".env 파일이나 Streamlit Secrets에 GEMINI_API_KEY가 설정되어 있지 않습니다.")
     return genai.Client(api_key=api_key)
 
 def parse_shuttle_document(uploaded_file):
@@ -74,7 +81,7 @@ def parse_shuttle_document(uploaded_file):
         raise ValueError("지원하지 않는 파일 형식입니다. (PDF, PPTX만 가능)")
 
     response = client.models.generate_content(
-        model='gemini-3.6-flash',
+        model='gemini-1.5-flash',
         contents=contents
     )
     

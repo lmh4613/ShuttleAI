@@ -1,15 +1,26 @@
 import os
 import json
 import requests
+import streamlit as st
 from dotenv import load_dotenv
 
 load_dotenv()
 
+def get_env_variable(var_name):
+    """환경 변수를 os.getenv에서 먼저 찾고, 없으면 st.secrets에서 가져옵니다."""
+    val = os.getenv(var_name)
+    if not val:
+        try:
+            val = st.secrets.get(var_name)
+        except Exception:
+            val = None
+    return val
+
 def refresh_access_token():
     """리프레시 토큰을 이용해 새로운 액세스 토큰을 발급받습니다."""
-    refresh_token = os.getenv("KAKAO_REFRESH_TOKEN")
-    client_id = os.getenv("KAKAO_CLIENT_ID")
-    client_secret = os.getenv("KAKAO_CLIENT_SECRET")
+    refresh_token = get_env_variable("KAKAO_REFRESH_TOKEN")
+    client_id = get_env_variable("KAKAO_CLIENT_ID")
+    client_secret = get_env_variable("KAKAO_CLIENT_SECRET")
     
     if not refresh_token or not client_id:
         return None, "필수 환경변수(KAKAO_CLIENT_ID 또는 KAKAO_REFRESH_TOKEN)가 누락되었습니다."

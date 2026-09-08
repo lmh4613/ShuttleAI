@@ -1,16 +1,36 @@
+import os
 import requests
+import streamlit as st
+from dotenv import load_dotenv
+
+load_dotenv()
+
+def get_env_variable(var_name):
+    val = os.getenv(var_name)
+    if not val:
+        try:
+            val = st.secrets.get(var_name)
+        except Exception:
+            val = None
+    return val
+
+client_id = get_env_variable("KAKAO_CLIENT_ID")
+client_secret = get_env_variable("KAKAO_CLIENT_SECRET")
+redirect_uri = get_env_variable("KAKAO_REDIRECT_URI") or "http://localhost:8501"
+
+# 인가 코드는 1회성이므로 카카오 로그인 리다이렉트 URL에서 추출한 코드를 여기에 입력하세요.
+authorization_code = "여기에_인가코드_입력"
 
 url = "https://kauth.kakao.com/oauth/token"
 data = {
     "grant_type": "authorization_code",
-    "client_id": "ec1adf1a1782c97f4a2b428e7f279544",  # 사용 중이신 REST API 키
-    "redirect_uri": "http://localhost:8501",
-    "code": "VyqGQnz9lgb3eaffi7uW3XZTzJwmZGgs_V5wmTIPVE-CYdc-4t4bvAAAAAQKFwtrAAABoGgWx_C2xj-RG-1vuA",
-    "client_secret": "DGqsuWaNzK9qom7UosdxWH3rFqQ7G7gS"
+    "client_id": client_id,
+    "redirect_uri": redirect_uri,
+    "code": authorization_code,
 }
 
-# 만약 카카오 앱 설정에서 Client Secret을 사용 중이라면 아래 주석을 풀고 입력하세요
-# data["client_secret"] = "여기에_클라이언트_시크릿_입력"
+if client_secret:
+    data["client_secret"] = client_secret
 
 response = requests.post(url, data=data)
 print(response.json())

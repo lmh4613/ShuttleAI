@@ -80,7 +80,7 @@ def get_coordinates_by_gemini(stop_name):
 반드시 아래 형태의 JSON 객체 딱 하나만 출력할 것. 마크다운 백틱 없이 순수 JSON만 출력하세요.
 {{"lat": 위도숫자, "lon": 경도숫자}}
 """
-    models_to_try = ["gemini-flash-latest", "gemini-pro", "gemini-1.5-flash"]
+    models_to_try = ["gemini-1.5-flash", "gemini-1.5-pro"]
     for m_name in models_to_try:
         try:
             model = genai.GenerativeModel(m_name)
@@ -171,7 +171,7 @@ def save_routes_with_sequential_geocoding(parsed_data, target_region="gyeonggi",
             "route_name": item.get("route_name", "기본 노선"),
             "stop_name": stop_name,
             "arrival_time": item.get("arrival_time", "08:00"),
-            "region": target_region,  # 업로드 창에 맞춰 강제 매핑
+            "region": target_region,  
             "lat": coord_info["lat"],
             "lon": coord_info["lon"],
             "nx": coord_info["nx"],
@@ -179,17 +179,13 @@ def save_routes_with_sequential_geocoding(parsed_data, target_region="gyeonggi",
             "status": "✅ 정상"
         })
     
-    # 기존 DB 데이터 불러오기
     existing_data = load_routes_from_db()
 
-    # 이번에 업로드된 target_region과 다른 지역 데이터는 안전하게 보존
-    # 예: 서울(seoul)을 업로드했다면 기존 경기(gyeonggi) 데이터는 유지되고 기존 서울 데이터만 교체됨
     preserved_data = [
         item for item in existing_data 
         if item.get("region", "gyeonggi") != target_region
     ]
     
-    # 보존된 데이터 + 새로 업로드된 데이터 합치기
     final_results = preserved_data + new_results
     
     with open(DB_FILE, "w", encoding="utf-8") as f:
@@ -263,7 +259,7 @@ def get_weather_forecast_by_coords(lat, lon, stop_name="", trip_type="출근길"
                 f"위 내용을 바탕으로 친근하고 자연스러운 한두 줄의 짧은 코멘트를 작성해주세요."
             )
             
-            models_to_try = ["gemini-flash-latest", "gemini-pro"]
+            models_to_try = ["gemini-1.5-flash", "gemini-1.5-pro"]
             for m_name in models_to_try:
                 try:
                     model = genai.GenerativeModel(m_name)

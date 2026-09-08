@@ -22,7 +22,6 @@ def migrate_db():
                     
         # 데이터 구조가 딕셔너리 형태인 경우 (예: {"routes": [...]})
         elif isinstance(data, dict):
-            # 만약 리스트를 담고 있는 키가 있다면 그 내부를 순회
             target_list = None
             for key, value in data.items():
                 if isinstance(value, list):
@@ -35,7 +34,6 @@ def migrate_db():
                         item["region"] = "gyeonggi"
                         count += 1
             else:
-                # 딕셔너리 최상단에 region이 없다면 추가
                 if "region" not in data:
                     data["region"] = "gyeonggi"
                     count += 1
