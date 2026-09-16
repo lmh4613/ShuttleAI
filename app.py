@@ -327,7 +327,7 @@ with st.sidebar:
         st.divider()
         with st.expander("👑 관리자 로그인"):
             admin_pw = st.text_input("관리자 비밀번호", type="password")
-            if st.button("로그인", use_container_width=True):
+            if st.button("로그인", width='stretch'):
                 if admin_pw == "admin1234":
                     st.session_state["is_admin"] = True
                     st.success("관리자 로그인 성공!")
@@ -339,7 +339,7 @@ with st.sidebar:
             st.success(f"👋 **{st.session_state['user_info']['nickname']}**님 환영합니다!")
         if st.session_state["is_admin"]:
             st.markdown("👑 **관리자 권한 활성화됨**")
-        if st.button("로그아웃", use_container_width=True):
+        if st.button("로그아웃", width='stretch'):
             st.session_state["user_info"] = None
             st.session_state["is_admin"] = False
             st.query_params.clear()
@@ -399,11 +399,55 @@ if tab1 is not None:
                     st.error(f"오류 발생: {e}")
 
         st.divider()
+        st.subheader("📍 특정 정류장 좌표 단건 재계산")
+        if sorted_db_data:
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                admin_regions = sorted(list(set(i.get('region', 'gyeonggi') for i in sorted_db_data)))
+                reg_map_admin = {"gyeonggi": "경기", "seoul": "서울"}
+                sel_admin_region = st.selectbox("지역 선택", admin_regions, format_func=lambda x: reg_map_admin.get(x, x), key="admin_reg")
+            
+            reg_filtered_admin = [i for i in sorted_db_data if i.get('region', 'gyeonggi') == sel_admin_region]
+            
+            with c2:
+                admin_routes = list(dict.fromkeys(i.get('route_name') for i in reg_filtered_admin if i.get('route_name')))
+                sel_rt = st.selectbox("노선 선택", admin_routes if admin_routes else ["노선 없음"], key="admin_rt")
+            
+            route_filtered_admin = [i for i in reg_filtered_admin if i.get('route_name') == sel_rt]
+            
+            with c3:
+                admin_stops = [i.get('stop_name') for i in route_filtered_admin]
+                sel_st = st.selectbox("정류장 선택", admin_stops if admin_stops else ["정류장 없음"], key="admin_st")
+            
+            if st.button("🎯 선택 정류장 좌표 재계산 및 갱신", type="primary"):
+                with st.spinner("카카오 지도 API 및 Gemini 격자 변환 처리 중..."):
+                    print(f"[LOG] 단건 좌표 재계산 요청 시작 -> 노선: {sel_rt}, 정류장: {sel_st}")
+                    try:
+                        succ, msg = weather_api.update_single_route_coordinate(sel_st, sel_rt)
+                        print(f"[LOG] 단건 좌표 재계산 응답 결과 -> 성공 여부: {succ}, 메시지: {msg}")
+                    except Exception as e:
+                        succ = False
+                        msg = f"예외 발생 (Exception): {str(e)}"
+                        print(f"[LOG ERROR] update_single_route_coordinate 실행 중 예외 발생: {e}")
+                
+                if succ:
+                    st.success(f"✅ 수정 완료: {msg}")
+                    st.toast("정류장 좌표가 성공적으로 재계산 및 수정되었습니다!", icon="🎯")
+                    st.rerun()
+                else:
+                    st.error(f"❌ 수정 실패: {msg}")
+                    with st.expander("🔍 Gemini 호출 및 지오코딩 실패 원인 상세 확인"):
+                        st.markdown(f"- **대상 노선:** `{sel_rt}`")
+                        st.markdown(f"- **대상 정류장:** `{sel_st}`")
+                        st.markdown(f"- **반환된 메시지/에러:** `{msg}`")
+                        st.info("💡 **확인 사항:** `weather_api.py` 내부의 Gemini API 호출 함수에서 API Key 인증 오류, 할당량 초과, 또는 모델명 설정 문제로 인해 예외가 발생하고 기본값(판교)으로 빠지고 있는지 확인이 필요합니다.")                    
+
+        st.divider()
         st.subheader("📝 노선 및 정류장 데이터 직접 편집 그리드")
         if sorted_db_data:
             df_routes = pd.DataFrame(sorted_db_data)
-            edited_df = st.data_editor(df_routes, num_rows="dynamic", use_container_width=True, key="route_grid_editor", height=400)
-            if st.button("💾 그리드 변경사항 저장", type="primary", use_container_width=True):
+            edited_df = st.data_editor(df_routes, num_rows="dynamic", width='stretch', key="route_grid_editor", height=400)
+            if st.button("💾 그리드 변경사항 저장", type="primary", width='stretch'):
                 try:
                     updated_records = edited_df.to_dict(orient="records")
                     if hasattr(weather_api, 'save_all_routes'):
@@ -478,7 +522,7 @@ with main_tab_target:
         st.markdown("")
         b1, b2, b3 = st.columns(3)
         with b1:
-            if st.button("🔍 탑승·하차 통합 날씨 조회", type="primary", use_container_width=True):
+            if st.button("🔍 탑승·하차 통합 날씨 조회", type="primary", width='stretch'):
                 with st.spinner("탑승지와 하차지의 기상청 날씨 및 AI 통합 코멘트 생성 중..."):
                     w_board = weather_api.get_weather_forecast_by_coords(board_lat, board_lon, stop_name=sel_board_stop, trip_type=trip_type)
                     w_arrive = weather_api.get_weather_forecast_by_coords(arrive_lat, arrive_lon, stop_name=sel_arrive_stop, trip_type=trip_type)
@@ -492,7 +536,7 @@ with main_tab_target:
         
         with b2:
             if st.session_state["user_info"]:
-                if st.button("⭐ 통합 즐겨찾기 추가", use_container_width=True):
+                if st.button("⭐ 통합 즐겨찾기 추가", width='stretch'):
                     new_item = {
                         "region": sel_region,
                         "route_name": sel_route,
@@ -517,11 +561,11 @@ with main_tab_target:
                     else:
                         st.warning("이미 등록된 구간입니다.")
             else:
-                st.button("⭐ 즐겨찾기 (로그인필요)", use_container_width=True, disabled=True)
+                st.button("⭐ 즐겨찾기 (로그인필요)", width='stretch', disabled=True)
 
         with b3:
             if st.session_state["user_info"]:
-                if st.button("💬 카카오톡 통합 날씨 전송", use_container_width=True):
+                if st.button("💬 카카오톡 통합 날씨 전송", width='stretch'):
                     wb = st.session_state.get('w_board')
                     wa = st.session_state.get('w_arrive')
                     if not wb or st.session_state.get('integrated_stop_key') != f"{sel_route}_{sel_board_stop}_{sel_arrive_stop}":
@@ -547,7 +591,7 @@ with main_tab_target:
                     else: 
                         st.error(f"전송 실패 ({code})")
             else:
-                st.button("💬 카카오톡 (로그인필요)", use_container_width=True, disabled=True)
+                st.button("💬 카카오톡 (로그인필요)", width='stretch', disabled=True)
 
         if 'w_board' in st.session_state and 'w_arrive' in st.session_state and st.session_state.get('integrated_stop_key') == f"{sel_route}_{sel_board_stop}_{sel_arrive_stop}":
             wb = st.session_state['w_board']
@@ -598,7 +642,7 @@ with main_tab_target:
                     st.markdown("**휴일 설정**")
                     exclude_hols = st.checkbox("대한민국 공휴일 자동 제외", value=current_exclude_holidays, key="exclude_hols_chk")
                 
-                if st.button("💾 공통 알림 조건 저장", type="primary"):
+                if st.button("💾 공통 알림 조건 저장", type="primary", width='stretch'):
                     new_config = {
                         "active_days": selected_days,
                         "exclude_holidays": exclude_hols
@@ -630,7 +674,7 @@ with main_tab_target:
                             current_idx = options_min.index(notify_min) if notify_min in options_min else 0
                             new_notify_min = st.selectbox("알림 시점", options_min, index=current_idx, format_func=lambda x: f"출발 {x}분 전", key=f"notif_min_{idx}")
                             
-                            if st.button("💾 설정 저장", key=f"save_notif_{idx}", use_container_width=True):
+                            if st.button("💾 설정 저장", key=f"save_notif_{idx}", width='stretch'):
                                 item["notify_enabled"] = new_notify_enabled
                                 item["notify_min"] = new_notify_min
                                 save_user_data(user_id, settings_list=user_settings)
@@ -638,7 +682,7 @@ with main_tab_target:
                                 st.rerun()
                         with cols_fav[2]:
                             st.write("")
-                            if st.button("🗑️ 삭제", key=f"del_fav_{idx}", use_container_width=True):
+                            if st.button("🗑️ 삭제", key=f"del_fav_{idx}", width='stretch'):
                                 user_settings.pop(idx)
                                 save_user_data(user_id, settings_list=user_settings)
                                 st.success("삭제되었습니다.")

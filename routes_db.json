@@ -4,22 +4,22 @@
         "route_name": "(출근) 망포/영통 1호",
         "stop_name": "수원아이파크시티8단지아파트 앞 버스정류장",
         "arrival_time": "06:28",
-        "lat": 37.2518,
-        "lon": 127.0295,
+        "lat": 37.24827,
+        "lon": 127.03091,
         "nx": 61,
         "ny": 120,
-        "status": "✅ 정상"
+        "status": "✅ 정상 (단건 재조회)"
     },
     {
         "region": "gyeonggi",
         "route_name": "(출근) 망포/영통 1호",
         "stop_name": "영통아이파크캐슬 1단지 버스정류장",
         "arrival_time": "06:34",
-        "lat": 37.241544,
-        "lon": 127.044521,
+        "lat": 37.24515,
+        "lon": 127.04423,
         "nx": 61,
         "ny": 120,
-        "status": "✅ 정상"
+        "status": "✅ 정상 (단건 재조회)"
     },
     {
         "region": "gyeonggi",
@@ -1727,10 +1727,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(출근) 미사/상일동",
         "stop_name": "미사강변 스타힐스아파트 801~802동 사이 버스정류장",
         "arrival_time": "06:20",
-        "region": "seoul",
         "lat": 37.569715,
         "lon": 127.189241,
         "nx": 63,
@@ -1738,10 +1738,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(출근) 미사/상일동",
         "stop_name": "미사역 9번 출구 20m 후방 DOGMARU(도그마루) 앞",
         "arrival_time": "06:26",
-        "region": "seoul",
         "lat": 37.564741,
         "lon": 127.189265,
         "nx": 63,
@@ -1749,10 +1749,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(출근) 미사/상일동",
         "stop_name": "상일동역 1번 출구 100m 전방 택시정류장 앞",
         "arrival_time": "06:35",
-        "region": "seoul",
         "lat": 37.55685,
         "lon": 127.16435,
         "nx": 63,
@@ -1760,10 +1760,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(출근) 미사/상일동",
         "stop_name": "고덕역 (명일동 신동아아파트 건너편 버스정류장)",
         "arrival_time": "06:37",
-        "region": "seoul",
         "lat": 37.5545,
         "lon": 127.1539,
         "nx": 63,
@@ -1771,10 +1771,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(출근) 미사/상일동",
         "stop_name": "명일역 2번 출구 메가커피 앞",
         "arrival_time": "06:40",
-        "region": "seoul",
         "lat": 37.55178,
         "lon": 127.14425,
         "nx": 63,
@@ -1782,10 +1782,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(출근) 미사/상일동",
         "stop_name": "둔촌동역 3번 출구 버스정류장 (뚜레쥬르 앞)",
         "arrival_time": "06:48",
-        "region": "seoul",
         "lat": 37.52766,
         "lon": 127.13628,
         "nx": 63,
@@ -1793,10 +1793,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(출근) 미사/상일동",
         "stop_name": "둔촌오륜역 2번 출구 100m 전방 버스정류장",
         "arrival_time": "06:50",
-        "region": "seoul",
         "lat": 37.5186,
         "lon": 127.1323,
         "nx": 62,
@@ -1804,10 +1804,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(출근) 노원",
         "stop_name": "노원역 4번 출구 100m 전방 기업은행 앞",
         "arrival_time": "06:25",
-        "region": "seoul",
         "lat": 37.65647,
         "lon": 127.06103,
         "nx": 61,
@@ -1815,10 +1815,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(출근) 노원",
         "stop_name": "중계역 2번 출구 30m 전방 버스정류장",
         "arrival_time": "06:29",
-        "region": "seoul",
         "lat": 37.644633,
         "lon": 127.06374,
         "nx": 61,
@@ -1826,10 +1826,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(출근) 노원",
         "stop_name": "이수청솔8단지아파트 805동 앞 버스정류장",
         "arrival_time": "06:37",
-        "region": "seoul",
         "lat": 37.3548,
         "lon": 127.1092,
         "nx": 62,
@@ -1837,10 +1837,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(출근) 서울시청 1호",
         "stop_name": "한국 프레스센터 앞 버스정류장",
         "arrival_time": "06:45",
-        "region": "seoul",
         "lat": 37.567438,
         "lon": 126.977821,
         "nx": 60,
@@ -1848,10 +1848,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(출근) 서울시청 1호",
         "stop_name": "을지로입구역 하나금융그룹 택시정류장",
         "arrival_time": "06:49",
-        "region": "seoul",
         "lat": 37.5659,
         "lon": 126.9831,
         "nx": 60,
@@ -1859,10 +1859,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(출근) 서울시청 1호",
         "stop_name": "명동역 10번 출구 150m 전방 키친명동(한식당) 앞",
         "arrival_time": "06:52",
-        "region": "seoul",
         "lat": 37.561348,
         "lon": 126.989125,
         "nx": 60,
@@ -1870,10 +1870,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(출근) 서울시청 1호",
         "stop_name": "순천향대학병원 앞 육교 엘리베이터 앞",
         "arrival_time": "06:54",
-        "region": "seoul",
         "lat": 37.535041,
         "lon": 127.005953,
         "nx": 60,
@@ -1881,10 +1881,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(출근) 서울시청 2호",
         "stop_name": "한국 프레스센터 앞 버스정류장",
         "arrival_time": "06:55",
-        "region": "seoul",
         "lat": 37.567438,
         "lon": 126.977821,
         "nx": 60,
@@ -1892,10 +1892,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(출근) 서울시청 2호",
         "stop_name": "을지로입구역 하나금융그룹 택시정류장",
         "arrival_time": "06:59",
-        "region": "seoul",
         "lat": 37.5659,
         "lon": 126.9831,
         "nx": 60,
@@ -1903,10 +1903,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(출근) 서울시청 2호",
         "stop_name": "명동역 10번 출구 150m 전방 키친명동(한식당) 앞",
         "arrival_time": "07:02",
-        "region": "seoul",
         "lat": 37.561348,
         "lon": 126.989125,
         "nx": 60,
@@ -1914,10 +1914,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(출근) 서울시청 2호",
         "stop_name": "순천향대학병원 앞 육교 엘리베이터 앞",
         "arrival_time": "07:04",
-        "region": "seoul",
         "lat": 37.535041,
         "lon": 127.005953,
         "nx": 60,
@@ -1925,10 +1925,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(출근) 목동/신도림 1호",
         "stop_name": "신도림테크노마트 앞",
         "arrival_time": "06:35",
-        "region": "seoul",
         "lat": 37.507135,
         "lon": 126.890352,
         "nx": 58,
@@ -1936,10 +1936,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(출근) 목동/신도림 1호",
         "stop_name": "신도림역 1번 출구 앞 횡단보도",
         "arrival_time": "06:37",
-        "region": "seoul",
         "lat": 37.509124,
         "lon": 126.891352,
         "nx": 58,
@@ -1947,10 +1947,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(출근) 목동/신도림 1호",
         "stop_name": "영등포역 중앙차로 버스정류장",
         "arrival_time": "06:41",
-        "region": "seoul",
         "lat": 37.516024,
         "lon": 126.907713,
         "nx": 59,
@@ -1958,10 +1958,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(출근) 목동/신도림 2호",
         "stop_name": "목동역 7번 출구 80m 전방 이마트에브리데이 앞",
         "arrival_time": "06:35",
-        "region": "seoul",
         "lat": 37.524951,
         "lon": 126.864522,
         "nx": 58,
@@ -1969,10 +1969,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(출근) 목동/신도림 2호",
         "stop_name": "신도림역 1번 출구 앞 횡단보도",
         "arrival_time": "06:47",
-        "region": "seoul",
         "lat": 37.509124,
         "lon": 126.891352,
         "nx": 58,
@@ -1980,10 +1980,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(출근) 목동/신도림 2호",
         "stop_name": "영등포역 중앙차로 버스정류장",
         "arrival_time": "06:51",
-        "region": "seoul",
         "lat": 37.516024,
         "lon": 126.907713,
         "nx": 59,
@@ -1991,10 +1991,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(출근) 이수/사당",
         "stop_name": "이수역 9번 출구 50m 전방 남서울새마을금고 앞 (예비군 수송버스 정류장)",
         "arrival_time": "06:53",
-        "region": "seoul",
         "lat": 37.485918,
         "lon": 126.981924,
         "nx": 60,
@@ -2002,10 +2002,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(출근) 이수/사당",
         "stop_name": "사당역 1번 출구 60m 전방 공영주차장 입구 ~ 한국전력 입구",
         "arrival_time": "07:00",
-        "region": "seoul",
         "lat": 37.47585,
         "lon": 126.9817,
         "nx": 60,
@@ -2013,10 +2013,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(출근) 이수/사당",
         "stop_name": "우면삼거리 버스정류장 (횡단보도 앞)",
         "arrival_time": "07:06",
-        "region": "seoul",
         "lat": 37.4682,
         "lon": 127.0305,
         "nx": 61,
@@ -2024,10 +2024,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(출근) 과천/사당",
         "stop_name": "푸르지오라비엔오.르센토데시앙 공항버스정류장(정부과천청사역 방면)",
         "arrival_time": "06:40",
-        "region": "seoul",
         "lat": 37.43394,
         "lon": 126.98387,
         "nx": 60,
@@ -2035,10 +2035,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(출근) 과천/사당",
         "stop_name": "정부과천청사역 2번 출구 앞 버스정류장",
         "arrival_time": "06:47",
-        "region": "seoul",
         "lat": 37.426857,
         "lon": 126.989482,
         "nx": 60,
@@ -2046,10 +2046,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(출근) 과천/사당",
         "stop_name": "과천역 6번 출구 앞 버스정류장",
         "arrival_time": "06:48",
-        "region": "seoul",
         "lat": 37.43346,
         "lon": 126.99572,
         "nx": 60,
@@ -2057,10 +2057,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(출근) 과천/사당",
         "stop_name": "사당역 1번 출구 60m 전방 공영주차장 입구 ~ 한국전력 입구",
         "arrival_time": "07:10",
-        "region": "seoul",
         "lat": 37.47585,
         "lon": 126.9817,
         "nx": 60,
@@ -2068,10 +2068,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(출근) 과천/사당",
         "stop_name": "우면삼거리 버스정류장 (횡단보도 앞)",
         "arrival_time": "07:16",
-        "region": "seoul",
         "lat": 37.4682,
         "lon": 127.0305,
         "nx": 61,
@@ -2079,10 +2079,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(퇴근) 노원",
         "stop_name": "KOICA 후문 맞은 편",
         "arrival_time": "17:25",
-        "region": "seoul",
         "lat": 37.414238,
         "lon": 127.100512,
         "nx": 62,
@@ -2090,10 +2090,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(퇴근) 노원",
         "stop_name": "화랑타운아파트 버스정류장",
         "arrival_time": "17:25",
-        "region": "seoul",
         "lat": 37.623775,
         "lon": 127.088656,
         "nx": 62,
@@ -2101,10 +2101,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(퇴근) 노원",
         "stop_name": "중계역 2번 출구 건너편",
         "arrival_time": "17:25",
-        "region": "seoul",
         "lat": 37.6448,
         "lon": 127.0636,
         "nx": 61,
@@ -2112,10 +2112,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(퇴근) 노원",
         "stop_name": "노원역/상계주공6단지 버스정류장",
         "arrival_time": "17:25",
-        "region": "seoul",
         "lat": 37.65476,
         "lon": 127.06079,
         "nx": 61,
@@ -2123,10 +2123,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(퇴근) 목동/신도림",
         "stop_name": "경기기업성장센터 블리스버거 앞",
         "arrival_time": "17:25",
-        "region": "seoul",
         "lat": 37.4121,
         "lon": 127.0984,
         "nx": 62,
@@ -2134,10 +2134,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(퇴근) 목동/신도림",
         "stop_name": "영등포역 버스정류장(중)",
         "arrival_time": "17:25",
-        "region": "seoul",
         "lat": 37.515852,
         "lon": 126.907761,
         "nx": 59,
@@ -2145,10 +2145,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(퇴근) 목동/신도림",
         "stop_name": "신도림역 버스정류장(중)",
         "arrival_time": "17:25",
-        "region": "seoul",
         "lat": 37.509265,
         "lon": 126.889812,
         "nx": 58,
@@ -2156,10 +2156,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(퇴근) 목동/신도림",
         "stop_name": "이마트에브리데이 목동역점 맞은편",
         "arrival_time": "17:25",
-        "region": "seoul",
         "lat": 37.5262,
         "lon": 126.8638,
         "nx": 58,
@@ -2167,10 +2167,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(퇴근) 미사/상일동",
         "stop_name": "KOICA 후문 맞은 편",
         "arrival_time": "17:30",
-        "region": "seoul",
         "lat": 37.414238,
         "lon": 127.100512,
         "nx": 62,
@@ -2178,10 +2178,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(퇴근) 미사/상일동",
         "stop_name": "둔촌오륜역 1번 출구 앞",
         "arrival_time": "17:30",
-        "region": "seoul",
         "lat": 37.5196,
         "lon": 127.1395,
         "nx": 63,
@@ -2189,10 +2189,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(퇴근) 미사/상일동",
         "stop_name": "둔촌동역 2번 출구 앞 버스정류장",
         "arrival_time": "17:30",
-        "region": "seoul",
         "lat": 37.52723,
         "lon": 127.13593,
         "nx": 63,
@@ -2200,10 +2200,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(퇴근) 미사/상일동",
         "stop_name": "명일역 3번 출구 앞 버스정류장",
         "arrival_time": "17:30",
-        "region": "seoul",
         "lat": 37.55122,
         "lon": 127.14468,
         "nx": 63,
@@ -2211,10 +2211,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(퇴근) 미사/상일동",
         "stop_name": "고덕역 4번 출구 앞 버스정류장",
         "arrival_time": "17:30",
-        "region": "seoul",
         "lat": 37.55478,
         "lon": 127.15423,
         "nx": 63,
@@ -2222,10 +2222,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(퇴근) 미사/상일동",
         "stop_name": "상일동역 5번 출구 앞 버스정류장",
         "arrival_time": "17:30",
-        "region": "seoul",
         "lat": 37.55695,
         "lon": 127.16665,
         "nx": 63,
@@ -2233,10 +2233,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(퇴근) 미사/상일동",
         "stop_name": "미사역 7번 출구 앞 택시정류장",
         "arrival_time": "17:30",
-        "region": "seoul",
         "lat": 37.56308,
         "lon": 127.19238,
         "nx": 63,
@@ -2244,10 +2244,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(퇴근) 미사/상일동",
         "stop_name": "센트리버.스타힐스.더샵리버포레 버스정류장",
         "arrival_time": "17:30",
-        "region": "seoul",
         "lat": 37.56847,
         "lon": 127.19561,
         "nx": 64,
@@ -2255,10 +2255,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(퇴근) 서울시청 1호",
         "stop_name": "경기기업성장센터 블리스버거 앞",
         "arrival_time": "17:30",
-        "region": "seoul",
         "lat": 37.4121,
         "lon": 127.0984,
         "nx": 62,
@@ -2266,10 +2266,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(퇴근) 서울시청 1호",
         "stop_name": "나인원한남아파트 건너편 SK주유소 앞",
         "arrival_time": "17:30",
-        "region": "seoul",
         "lat": 37.53858,
         "lon": 127.0057,
         "nx": 60,
@@ -2277,10 +2277,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(퇴근) 서울시청 1호",
         "stop_name": "앰배서더호텔 이비스스타일 서울명동 앞",
         "arrival_time": "17:30",
-        "region": "seoul",
         "lat": 37.562086,
         "lon": 126.989389,
         "nx": 60,
@@ -2288,10 +2288,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(퇴근) 서울시청 1호",
         "stop_name": "SK타워 앞",
         "arrival_time": "17:30",
-        "region": "seoul",
         "lat": 37.5664,
         "lon": 126.985,
         "nx": 60,
@@ -2299,10 +2299,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(퇴근) 서울시청 1호",
         "stop_name": "서울광장 앞 횡단보도",
         "arrival_time": "17:30",
-        "region": "seoul",
         "lat": 37.565985,
         "lon": 126.97745,
         "nx": 60,
@@ -2310,10 +2310,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(퇴근) 서울시청 2호",
         "stop_name": "경기기업성장센터 블리스버거 앞",
         "arrival_time": "17:35",
-        "region": "seoul",
         "lat": 37.4121,
         "lon": 127.0984,
         "nx": 62,
@@ -2321,10 +2321,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(퇴근) 서울시청 2호",
         "stop_name": "나인원한남아파트 건너편 SK주유소 앞",
         "arrival_time": "17:35",
-        "region": "seoul",
         "lat": 37.53858,
         "lon": 127.0057,
         "nx": 60,
@@ -2332,10 +2332,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(퇴근) 서울시청 2호",
         "stop_name": "앰배서더호텔 이비스스타일 서울명동 앞",
         "arrival_time": "17:35",
-        "region": "seoul",
         "lat": 37.562086,
         "lon": 126.989389,
         "nx": 60,
@@ -2343,10 +2343,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(퇴근) 서울시청 2호",
         "stop_name": "SK타워 앞",
         "arrival_time": "17:35",
-        "region": "seoul",
         "lat": 37.5664,
         "lon": 126.985,
         "nx": 60,
@@ -2354,10 +2354,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(퇴근) 서울시청 2호",
         "stop_name": "서울광장 앞 횡단보도",
         "arrival_time": "17:35",
-        "region": "seoul",
         "lat": 37.565985,
         "lon": 126.97745,
         "nx": 60,
@@ -2365,10 +2365,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(퇴근) 과천/사당",
         "stop_name": "경기기업성장센터 블리스버거 앞",
         "arrival_time": "17:35",
-        "region": "seoul",
         "lat": 37.4121,
         "lon": 127.0984,
         "nx": 62,
@@ -2376,10 +2376,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(퇴근) 과천/사당",
         "stop_name": "우면삼거리 버스정류장",
         "arrival_time": "17:35",
-        "region": "seoul",
         "lat": 37.4676,
         "lon": 127.0289,
         "nx": 61,
@@ -2387,10 +2387,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(퇴근) 과천/사당",
         "stop_name": "대항병원 버스정류장(사당1동상점가 방면)",
         "arrival_time": "17:35",
-        "region": "seoul",
         "lat": 37.47858,
         "lon": 126.98539,
         "nx": 60,
@@ -2398,10 +2398,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(퇴근) 과천/사당",
         "stop_name": "사당역 중앙차로 버스정류장(사당자동차학원 방면)",
         "arrival_time": "17:35",
-        "region": "seoul",
         "lat": 37.47585,
         "lon": 126.98175,
         "nx": 60,
@@ -2409,10 +2409,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(퇴근) 과천/사당",
         "stop_name": "과천역 7번 출구 앞 버스정류장",
         "arrival_time": "17:35",
-        "region": "seoul",
         "lat": 37.433365,
         "lon": 126.996497,
         "nx": 60,
@@ -2420,10 +2420,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(퇴근) 과천/사당",
         "stop_name": "정부과천청사역 3번 출구 70m 전방 버스정류장",
         "arrival_time": "17:35",
-        "region": "seoul",
         "lat": 37.427341,
         "lon": 126.989376,
         "nx": 60,
@@ -2431,10 +2431,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(퇴근) 과천/사당",
         "stop_name": "푸르지오라비엔오.르센토데시앙 공항버스정류장(북판교 방면)",
         "arrival_time": "17:35",
-        "region": "seoul",
         "lat": 37.411678,
         "lon": 126.991275,
         "nx": 60,
@@ -2442,10 +2442,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(퇴근) 이수/사당",
         "stop_name": "경기기업성장센터 블리스버거 앞",
         "arrival_time": "18:00",
-        "region": "seoul",
         "lat": 37.4121,
         "lon": 127.0984,
         "nx": 62,
@@ -2453,10 +2453,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(퇴근) 이수/사당",
         "stop_name": "우면삼거리 버스정류장",
         "arrival_time": "18:00",
-        "region": "seoul",
         "lat": 37.4676,
         "lon": 127.0289,
         "nx": 61,
@@ -2464,10 +2464,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(퇴근) 이수/사당",
         "stop_name": "대항병원 버스정류장(사당1동상점가 방면)",
         "arrival_time": "18:00",
-        "region": "seoul",
         "lat": 37.47858,
         "lon": 126.98539,
         "nx": 60,
@@ -2475,10 +2475,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(퇴근) 이수/사당",
         "stop_name": "사당역 14번 출구 버스정류장",
         "arrival_time": "18:00",
-        "region": "seoul",
         "lat": 37.47665,
         "lon": 126.98218,
         "nx": 60,
@@ -2486,10 +2486,10 @@
         "status": "✅ 정상"
     },
     {
+        "region": "seoul",
         "route_name": "(퇴근) 이수/사당",
         "stop_name": "이수역 중앙차로 버스정류장(총신대입구역 방면)",
         "arrival_time": "18:00",
-        "region": "seoul",
         "lat": 37.4858,
         "lon": 126.9818,
         "nx": 60,
