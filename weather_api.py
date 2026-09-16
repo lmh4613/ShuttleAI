@@ -6,6 +6,9 @@ from dotenv import load_dotenv
 from google import genai
 from datetime import datetime, timedelta
 import urllib.parse
+import logging
+
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -320,9 +323,14 @@ def get_weather_forecast_by_coords(lat, lon, stop_name="", trip_type="출근길"
     print(f"[LOG KMA] 파싱 결과 -> 기온: {temp}, 하늘: {sky}, 강수확률: {pop}")
     
     if temp == "정보 없음":
-        temp = "20°C"
-        sky = "맑음"
-        pop = "0%"
+        logger.warning("Weather unavailable for grid %s,%s", nx, ny)
+        return {
+            "available": False,
+            "temperature": "정보 없음", "sky_status": "정보 없음",
+            "rain_probability": "정보 없음",
+            "calculated_grid": f"격자 좌표: NX={nx}, NY={ny}",
+            "message": "날씨 정보를 불러오지 못했습니다. 잠시 후 다시 조회해 주세요.",
+        }
 
     ai_message = f"{stop_name} 정류장 주변 {trip_type} 날씨입니다. 안전한 이동 되세요!"
     if GEMINI_API_KEY and client:
@@ -353,12 +361,14 @@ def get_weather_forecast_by_coords(lat, lon, stop_name="", trip_type="출근길"
                     if response and response.text:
                         ai_message = response.text.strip()
                         break
-                except Exception:
+                except Exception as exc:
+                    logger.warning("Weather comment generation failed: %s", type(exc).__name__)
                     continue
         except Exception:
             pass
 
     return {
+        "available": True,
         "temperature": temp,
         "sky_status": sky,
         "rain_probability": pop,

@@ -6,12 +6,17 @@ import json
 import re
 import threading
 import time
+import logging
+from urllib.parse import urlencode
+from demo_support import (prepare_login, consume_login, api_request,
+                          deliver_message, message_succeeded, notify_once, SELECTION_KEYS)
 from datetime import datetime, timedelta
 import weather_api
 import ppt_parser
 from dotenv import load_dotenv
 
 load_dotenv()
+logger = logging.getLogger(__name__)
 
 st.set_page_config(page_title="AI 셔틀버스 날씨 알림", page_icon="🚌", layout="wide")
 
@@ -60,6 +65,9 @@ def get_user_data(user_id):
             "active_days": ["월", "화", "수", "목", "금"],
             "exclude_holidays": True
         }
+    user_entry.setdefault("settings", [])
+    user_entry.setdefault("access_token", "")
+    user_entry.setdefault("refresh_token", "")
     return user_entry
 
 def save_user_data(user_id, settings_list=None, access_token=None, refresh_token=None, notification_config=None):
@@ -86,9 +94,8 @@ def refresh_kakao_token(refresh_token):
     }
     if KAKAO_CLIENT_SECRET:
         payload["client_secret"] = KAKAO_CLIENT_SECRET
-    res = requests.post(token_url, data=payload)
-    if res.status_code == 200:
-        data = res.json()
+    status, data = api_request("POST", token_url, data=payload)
+    if status == 200:
         return data.get("access_token"), data.get("refresh_token")
     return None, None
 
@@ -102,8 +109,22 @@ def send_kakao_memo(access_token, title, description):
         "button_title": "앱 열기"
     }
     payload = {"template_object": json.dumps(template_object)}
-    response = requests.post(talk_url, headers=headers, data=payload)
-    return response.status_code, response.json()
+    return api_request("POST", talk_url, headers=headers, data=payload)
+
+
+def send_user_memo(user_id, title, description, scheduled=False):
+    user = get_user_data(user_id)
+    try:
+        return deliver_message(
+            user.get("access_token"), user.get("refresh_token"),
+            lambda token: send_kakao_memo(token, title, description),
+            refresh_kakao_token,
+            lambda at, rt: save_user_data(user_id, access_token=at, refresh_token=rt),
+            retry_transient=scheduled,
+        )
+    except OSError:
+        logger.exception("Could not persist refreshed Kakao credentials")
+        return 0, {"error": "save_failed"}
 
 # 대한민국 공휴일 목록 조회 (Nager.Date API 활용, 1일 캐싱)
 @st.cache_data(ttl=86400)
@@ -126,11 +147,18 @@ def is_today_holiday():
 def parse_temp(temp_str):
     if not temp_str:
         return 0.0
-    match = re.search(r'[-+]?\d*\.\d+|\d+', str(temp_str))
+    match = re.search(r'[-+]?(?:\d+(?:\.\d+)?|\.\d+)', str(temp_str))
     return float(match.group()) if match else 0.0
 
 # 탑승·하차 날씨 비교에 따른 통합 AI 멘트 생성 헬퍼 함수
 def get_integrated_ai_message(wb, wa, board_name, arrive_name):
+    if not wb.get("available", True) or not wa.get("available", True):
+        return "\n\n".join(
+            f"{name}: {w.get('message', '날씨 정보를 불러오지 못했습니다.')}"
+            if not w.get("available", True) else
+            f"{name}: {w['temperature']}, {w['sky_status']}. {w['message']}"
+            for name, w in ((board_name, wb), (arrive_name, wa))
+        )
     t1, t2 = wb.get("temperature", ""), wa.get("temperature", "")
     s1, s2 = wb.get("sky_status", ""), wa.get("sky_status", "")
     msg1, msg2 = wb.get("message", ""), wa.get("message", "")
@@ -168,12 +196,18 @@ def get_integrated_ai_message(wb, wa, board_name, arrive_name):
 # 백그라운드 자동 알림 스케줄러 워커
 def notification_background_worker():
     sent_cache = {}
+    attempt_cache = {}
+    cache_date = None
     weekday_map = {0: "월", 1: "화", 2: "수", 3: "목", 4: "금", 5: "토", 6: "일"}
     
     while True:
         try:
             now = datetime.now()
             current_date_str = now.strftime("%Y-%m-%d")
+            if cache_date != current_date_str:
+                sent_cache.clear()
+                attempt_cache.clear()
+                cache_date = current_date_str
             current_time_str = now.strftime("%H:%M")
             current_weekday = weekday_map.get(now.weekday())
             
@@ -208,19 +242,13 @@ def notification_background_worker():
                         target_dt = datetime(now.year, now.month, now.day, bt_dt.hour, bt_dt.minute) - timedelta(minutes=notify_min)
                         target_time_str = target_dt.strftime("%H:%M")
                         
-                        cache_key = f"{uid}_{item.get('route_name')}_{item.get('board_stop')}_{current_date_str}"
-                        if current_time_str == target_time_str and cache_key not in sent_cache:
-                            sent_cache[cache_key] = True
-                            
-                            if not access_token and refresh_token:
-                                new_at, new_rt = refresh_kakao_token(refresh_token)
-                                if new_at:
-                                    access_token = new_at
-                                    if new_rt:
-                                        refresh_token = new_rt
-                                    save_user_data(uid, None, access_token=access_token, refresh_token=refresh_token)
-                            
-                            if access_token:
+                        cache_key = (uid, item.get('region'), item.get('route_name'),
+                                     item.get('board_stop'), item.get('arrive_stop'), current_date_str)
+                        attempts, last_attempt = attempt_cache.get(cache_key, (0, float('-inf')))
+                        if (0 <= (now - target_dt).total_seconds() < 120
+                                and cache_key not in sent_cache and attempts < 2
+                                and time.monotonic() - last_attempt >= 30):
+                            if access_token or refresh_token:
                                 b_lat = float(item.get('board_lat', 37.3947))
                                 b_lon = float(item.get('board_lon', 127.1111))
                                 a_lat = float(item.get('arrive_lat', 37.3947))
@@ -246,7 +274,8 @@ def notification_background_worker():
                                     f"• 기온: {wa['temperature']} | 상태: {wa['sky_status']}\n\n"
                                     f"🤖 **[AI 코멘트]**\n{integrated_ai_text}"
                                 )
-                                send_kakao_memo(access_token, f"[{r_name}] 탑승·하차 날씨 알림", desc)
+                                notify_once(sent_cache, attempt_cache, cache_key,
+                                    lambda: send_user_memo(uid, f"[{r_name}] 탑승·하차 날씨 알림", desc, scheduled=True))
                     except Exception as ex:
                         print(f"Notification error: {ex}")
         except Exception as e:
@@ -267,63 +296,78 @@ if "user_info" not in st.session_state:
 if "is_admin" not in st.session_state:
     st.session_state["is_admin"] = False
 
-# 카카오 로그인 인가 코드 처리
+# OAuth callbacks create a new Streamlit session; restore only validated selections.
+st.session_state.setdefault("preview_user", False)
 query_params = st.query_params
-if "code" in query_params and st.session_state["user_info"] is None:
-    auth_code = query_params["code"]
-    token_url = "https://kauth.kakao.com/oauth/token"
-    payload = {
-        "grant_type": "authorization_code",
-        "client_id": KAKAO_CLIENT_ID,
-        "redirect_uri": KAKAO_REDIRECT_URI,
-        "code": auth_code
-    }
-    if KAKAO_CLIENT_SECRET:
-        payload["client_secret"] = KAKAO_CLIENT_SECRET
-    
-    res = requests.post(token_url, data=payload)
-    if res.status_code == 200:
-        token_data = res.json()
-        access_token = token_data.get("access_token")
-        refresh_token = token_data.get("refresh_token")
-        
-        user_info_url = "https://kapi.kakao.com/v2/user/me"
-        headers = {"Authorization": f"Bearer {access_token}"}
-        user_res = requests.get(user_info_url, headers=headers)
-        
-        if user_res.status_code == 200:
-            user_data = user_res.json()
-            kakao_id = user_data.get("id")
-            nickname = user_data.get("properties", {}).get("nickname", "사용자")
-            
-            st.session_state["user_info"] = {
-                "id": kakao_id,
-                "nickname": nickname,
-                "access_token": access_token,
-                "refresh_token": refresh_token
-            }
-            
-            save_user_data(kakao_id, access_token=access_token, refresh_token=refresh_token)
-            
-            ADMIN_KAKAO_IDS = [5070327065]
-            if kakao_id in ADMIN_KAKAO_IDS:
-                st.session_state["is_admin"] = True
-            
-            st.query_params.clear()
-            st.rerun()
+if ("code" in query_params or "error" in query_params) and st.session_state["user_info"] is None:
+    selection = consume_login(query_params.get("state", ""))
+    auth_code = query_params.get("code")
+    denied = "error" in query_params
+    st.query_params.clear()
+    if selection is None:
+        st.session_state["login_error"] = "로그인 요청이 만료되었거나 유효하지 않습니다. 카카오 로그인 버튼으로 다시 시도해 주세요."
+    else:
+        st.session_state.update(selection)
+        st.session_state["restored_selection"] = selection
+        if denied:
+            st.session_state["login_error"] = "카카오 로그인이 취소되었습니다. 동의 후 다시 로그인할 수 있습니다."
+        else:
+            payload = {"grant_type": "authorization_code", "client_id": KAKAO_CLIENT_ID,
+                       "redirect_uri": KAKAO_REDIRECT_URI, "code": auth_code}
+            if KAKAO_CLIENT_SECRET:
+                payload["client_secret"] = KAKAO_CLIENT_SECRET
+            status, token_data = api_request("POST", "https://kauth.kakao.com/oauth/token", data=payload)
+            access_token = token_data.get("access_token")
+            if status == 200 and access_token:
+                user_status, user_data = api_request("GET", "https://kapi.kakao.com/v2/user/me",
+                    headers={"Authorization": f"Bearer {access_token}"})
+                if user_status == 200 and user_data.get("id") is not None:
+                    kakao_id = user_data["id"]
+                    refresh_token = token_data.get("refresh_token") or get_user_data(kakao_id).get("refresh_token", "")
+                    try:
+                        save_user_data(kakao_id, access_token=access_token, refresh_token=refresh_token)
+                    except OSError:
+                        logger.exception("Could not save login data")
+                        st.session_state["login_error"] = "로그인 정보를 저장하지 못했습니다. 파일 접근 상태를 확인한 뒤 다시 시도해 주세요."
+                    else:
+                        st.session_state["user_info"] = {
+                            "id": kakao_id, "nickname": user_data.get("properties", {}).get("nickname", "사용자"),
+                            "access_token": access_token, "refresh_token": refresh_token}
+                        st.session_state["is_admin"] = kakao_id in [5070327065]
+                        st.session_state["preview_user"] = False
+                        st.session_state.pop("login_error", None)
+                else:
+                    st.session_state["login_error"] = "카카오 사용자 정보를 가져오지 못했습니다. 잠시 후 다시 로그인해 주세요."
+            else:
+                st.session_state["login_error"] = "카카오 로그인에 연결하지 못했습니다. 인터넷 연결을 확인하고 다시 로그인해 주세요."
+    st.rerun()
 
+# Restore only existing choices, before widgets are constructed.
+restored = st.session_state.pop("restored_selection", None)
+if restored:
+    rows = weather_api.load_routes_from_db()
+    rows = [r for r in rows if r.get("region", "gyeonggi") == restored.get("user_reg")]
+    if not rows:
+        restored = {}
+    elif restored.get("user_rt") not in {r.get("route_name") for r in rows}:
+        restored = {"user_reg": restored["user_reg"]}
+    else:
+        stops = {r.get("stop_name") for r in rows if r.get("route_name") == restored["user_rt"]}
+        restored = {k: v for k, v in restored.items()
+                    if k not in ("user_board_st", "user_arrive_st") or v in stops}
+    for key in ("user_reg", "user_rt", "user_board_st", "user_arrive_st"):
+        st.session_state.pop(key, None)
+    st.session_state.update(restored)
+
+login_link = None
 # 사이드바: 로그인 및 관리자 인증
 with st.sidebar:
     st.subheader("🔐 사용자 인증")
     if st.session_state["user_info"] is None and not st.session_state["is_admin"]:
         st.info("💡 카카오 로그인을 통해 즐겨찾기 및 알림 기능을 이용하세요.")
-        kakao_login_url = f"https://kauth.kakao.com/oauth/authorize?client_id={KAKAO_CLIENT_ID}&redirect_uri={KAKAO_REDIRECT_URI}&response_type=code"
-        st.markdown(f"""
-        <a href="{kakao_login_url}" target="_self" style="display: block; text-align: center; background-color: #FEE500; color: #000000; padding: 10px; border-radius: 5px; text-decoration: none; font-weight: bold; margin-bottom: 10px;">
-            💬 카카오계정으로 로그인
-        </a>
-        """, unsafe_allow_html=True)
-        
+        login_link = st.empty()
+        if st.session_state.get("login_error"):
+            st.error(st.session_state["login_error"])
         st.divider()
         with st.expander("👑 관리자 로그인"):
             admin_pw = st.text_input("관리자 비밀번호", type="password")
@@ -338,10 +382,27 @@ with st.sidebar:
         if st.session_state["user_info"]:
             st.success(f"👋 **{st.session_state['user_info']['nickname']}**님 환영합니다!")
         if st.session_state["is_admin"]:
-            st.markdown("👑 **관리자 권한 활성화됨**")
+            if st.session_state["preview_user"]:
+                st.info("일반 사용자 미리보기 중 · 실제 관리자 권한은 유지됩니다.")
+                if st.button("관리자 모드로 돌아가기", width="stretch"):
+                    st.session_state["restored_selection"] = {
+                        k: st.session_state[k] for k in SELECTION_KEYS if k in st.session_state}
+                    st.session_state["preview_user"] = False
+                    st.rerun()
+            else:
+                st.markdown("👑 **관리자 권한 활성화됨**")
+                if st.button("일반 사용자 모드로 보기", width="stretch"):
+                    st.session_state["restored_selection"] = {
+                        k: st.session_state[k] for k in SELECTION_KEYS if k in st.session_state}
+                    st.session_state["preview_user"] = True
+                    st.rerun()
+            if st.session_state["user_info"] is None:
+                st.info("즐겨찾기와 메시지 시연에는 카카오 로그인이 필요합니다.")
+                login_link = st.empty()
         if st.button("로그아웃", width='stretch'):
             st.session_state["user_info"] = None
             st.session_state["is_admin"] = False
+            st.session_state["preview_user"] = False
             st.query_params.clear()
             st.rerun()
 
@@ -353,8 +414,8 @@ sorted_db_data = sorted(
     key=lambda x: x.get('region', 'gyeonggi')
 )
 
-if st.session_state["is_admin"]:
-    tab1, tab2 = st.tabs(["👑 [어드민] 노선 관리 및 그리드 편집", "🌤️ 셔틀버스 탑승·하차 통합 날씨 및 즐겨찾기"])
+if st.session_state["is_admin"] and not st.session_state["preview_user"]:
+    tab1, tab2 = st.tabs(["👑 [어드민] 노선 관리 및 그리드 편집", "🌤️ 셔틀버스 탑승·하차 통합 날씨 및 즐겨찾기"], default="🌤️ 셔틀버스 탑승·하차 통합 날씨 및 즐겨찾기")
 else:
     tab1 = None
     tab2 = st.tabs(["🌤️ 셔틀버스 탑승·하차 통합 날씨 및 즐겨찾기"])[0]
@@ -379,7 +440,8 @@ if tab1 is not None:
                     st.success("경기 노선 반영 완료!")
                     st.rerun()
                 except Exception as e:
-                    st.error(f"오류 발생: {e}")
+                    logger.exception("Route import failed")
+                    st.error("노선 문서를 처리하지 못했습니다. 파일과 API 연결 상태를 확인해 주세요.")
 
         with up_tab_se:
             file_se = st.file_uploader("서울 셔틀 노선 파일 선택 (PDF, PPTX)", type=["pdf", "pptx"], key="up_se")
@@ -396,7 +458,8 @@ if tab1 is not None:
                     st.success("서울 노선 반영 완료!")
                     st.rerun()
                 except Exception as e:
-                    st.error(f"오류 발생: {e}")
+                    logger.exception("Route import failed")
+                    st.error("노선 문서를 처리하지 못했습니다. 파일과 API 연결 상태를 확인해 주세요.")
 
         st.divider()
         st.subheader("📍 특정 정류장 좌표 단건 재계산")
@@ -494,7 +557,9 @@ with main_tab_target:
         with col_s2:
             st.markdown("🔴 **[2] 내 하차(도착) 정류장 선택**")
             if is_leave:
-                default_arrive_idx = len(stops) - 1 if len(stops) > 1 else 0
+                if st.session_state.get("user_arrive_st") not in stops:
+                    st.session_state.pop("user_arrive_st", None)
+                default_arrive_idx = 0 if "user_arrive_st" in st.session_state else max(len(stops) - 1, 0)
                 sel_arrive_stop = st.selectbox("하차 정류장 (도착지)", stops if stops else ["정류장 없음"], index=default_arrive_idx, key="user_arrive_st")
             else:
                 sel_arrive_stop = st.selectbox("하차 정류장 (도착지)", ["판교 제2테크노밸리"], key="user_arrive_st_fixed")
@@ -572,7 +637,6 @@ with main_tab_target:
                         wb = weather_api.get_weather_forecast_by_coords(board_lat, board_lon, stop_name=sel_board_stop, trip_type=trip_type)
                         wa = weather_api.get_weather_forecast_by_coords(arrive_lat, arrive_lon, stop_name=sel_arrive_stop, trip_type=trip_type)
                     
-                    token = st.session_state["user_info"]["access_token"]
                     integrated_ai_text = get_integrated_ai_message(wb, wa, sel_board_stop, sel_arrive_stop)
                     arrive_time_str = "" if is_leave else (f" ({arrive_row.get('arrival_time', '-')})" if arrive_row.get('arrival_time') else "")
                     
@@ -584,12 +648,12 @@ with main_tab_target:
                         f"• 기온: {wa['temperature']} | 상태: {wa['sky_status']}\n\n"
                         f"🤖 **[AI 코멘트]**\n{integrated_ai_text}"
                     )
-                    code, res = send_kakao_memo(token, f"[{sel_route}] 탑승·하차 날씨 안내", desc)
-                    if code == 200: 
+                    code, res = send_user_memo(user_id, f"[{sel_route}] 탑승·하차 날씨 안내", desc)
+                    if message_succeeded(code, res):
                         st.success("카카오톡 통합 전송 완료!")
                         st.toast("카카오톡 나에게 톡메시지가 전송되었습니다.", icon="💬")
                     else: 
-                        st.error(f"전송 실패 ({code})")
+                        st.error("카카오톡 전송에 실패했습니다. 잠시 후 다시 시도해 주세요. 계속 실패하면 로그아웃 후 카카오 로그인으로 다시 연결해 주세요.")
             else:
                 st.button("💬 카카오톡 (로그인필요)", width='stretch', disabled=True)
 
@@ -597,6 +661,8 @@ with main_tab_target:
             wb = st.session_state['w_board']
             wa = st.session_state['w_arrive']
             
+            if not wb.get("available", True) or not wa.get("available", True):
+                st.warning("일부 정류장의 날씨 정보를 불러오지 못했습니다. 잠시 후 다시 조회해 주세요.")
             st.divider()
             st.markdown(f"### 📊 [{sel_route}] 탑승·하차 날씨 비교 리포트")
             
@@ -693,3 +759,13 @@ with main_tab_target:
             st.info("🔒 카카오 로그인 후 나만의 즐겨찾기 및 알림 설정 목록을 확인하실 수 있습니다.")
     else:
         st.info("등록된 노선 데이터가 없습니다.")
+
+# Render after the selectors, so OAuth always snapshots the current choices.
+if login_link is not None:
+    state = prepare_login(st.session_state.get("oauth_state"), st.session_state)
+    st.session_state["oauth_state"] = state
+    login_url = "https://kauth.kakao.com/oauth/authorize?" + urlencode({
+        "client_id": KAKAO_CLIENT_ID, "redirect_uri": KAKAO_REDIRECT_URI,
+        "response_type": "code", "state": state,
+    })
+    login_link.markdown(f'<a href="{login_url}" target="_self" style="display:block;text-align:center;background:#FEE500;color:#000;padding:10px;border-radius:5px;text-decoration:none;font-weight:bold">💬 카카오계정으로 로그인</a>', unsafe_allow_html=True)
