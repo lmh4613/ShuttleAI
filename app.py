@@ -152,13 +152,18 @@ def parse_temp(temp_str):
 
 # 탑승·하차 날씨 비교에 따른 통합 AI 멘트 생성 헬퍼 함수
 def get_integrated_ai_message(wb, wa, board_name, arrive_name):
+    rain_notes = " ".join(
+        f"{name}: {w['precipitation_note']}"
+        for name, w in ((board_name, wb), (arrive_name, wa))
+        if w.get("available", True) and w.get("precipitation_note")
+    )
     if not wb.get("available", True) or not wa.get("available", True):
         return "\n\n".join(
             f"{name}: {w.get('message', '날씨 정보를 불러오지 못했습니다.')}"
             if not w.get("available", True) else
             f"{name}: {w['temperature']}, {w['sky_status']}. {w['message']}"
             for name, w in ((board_name, wb), (arrive_name, wa))
-        )
+        ) + (f"\n\n{rain_notes}" if rain_notes else "")
     t1, t2 = wb.get("temperature", ""), wa.get("temperature", "")
     s1, s2 = wb.get("sky_status", ""), wa.get("sky_status", "")
     msg1, msg2 = wb.get("message", ""), wa.get("message", "")
@@ -171,7 +176,7 @@ def get_integrated_ai_message(wb, wa, board_name, arrive_name):
     is_same_sky = (s1 == s2)
     
     if is_similar_temp and is_same_sky:
-        return f"탑승지({board_name})와 하차지({arrive_name})의 날씨({s1})가 같고 기온 차이도 적어(탑승지 {t1}, 하차지 {t2}) 비슷한 기상 환경입니다. {msg1}"
+        return f"탑승 예정 시간대에는 탑승지({board_name})와 하차지({arrive_name})의 날씨({s1})가 같고 기온 차이도 적어(탑승지 {t1}, 하차지 {t2}) 비슷한 기상 환경으로 예상됩니다. {msg1} {rain_notes}".strip()
     else:
         diff_desc = []
         if not is_similar_temp:
@@ -182,15 +187,12 @@ def get_integrated_ai_message(wb, wa, board_name, arrive_name):
         if not is_same_sky:
             diff_desc.append(f"하늘 상태가 탑승지({s1})와 하차지({s2})로 다릅니다.")
         
-        rain_keywords = ["비", "강수", "우산", "눈"]
-        has_rain = any(k in s1 or k in s2 or k in msg1 or k in msg2 for k in rain_keywords)
-        umbrella_tip = " 하차지에 비나 눈 소식이 있으니 우산을 챙기세요!" if has_rain else ""
-        
         diff_text = " ".join(diff_desc)
         return (
-            f"탑승지와 하차지의 기상 환경에 차이가 있습니다. {diff_text}{umbrella_tip}\n\n"
+            f"탑승 예정 시간대에는 탑승지와 하차지의 기상 환경에 차이가 예상됩니다. {diff_text}\n\n"
             f"• **{board_name}** ({t1}, {s1}): {msg1}\n"
             f"• **{arrive_name}** ({t2}, {s2}): {msg2}"
+            + (f"\n\n{rain_notes}" if rain_notes else "")
         )
 
 # 백그라운드 자동 알림 스케줄러 워커
@@ -239,7 +241,8 @@ def notification_background_worker():
                     
                     try:
                         bt_dt = datetime.strptime(board_time, "%H:%M")
-                        target_dt = datetime(now.year, now.month, now.day, bt_dt.hour, bt_dt.minute) - timedelta(minutes=notify_min)
+                        boarding_dt = datetime(now.year, now.month, now.day, bt_dt.hour, bt_dt.minute)
+                        target_dt = boarding_dt - timedelta(minutes=notify_min)
                         target_time_str = target_dt.strftime("%H:%M")
                         
                         cache_key = (uid, item.get('region'), item.get('route_name'),
@@ -258,8 +261,8 @@ def notification_background_worker():
                                 t_type = item.get('trip_type', '출근길')
                                 r_name = item.get('route_name')
                                 
-                                wb = weather_api.get_weather_forecast_by_coords(b_lat, b_lon, stop_name=b_name, trip_type=t_type)
-                                wa = weather_api.get_weather_forecast_by_coords(a_lat, a_lon, stop_name=a_name, trip_type=t_type)
+                                wb = weather_api.get_weather_forecast_by_coords(b_lat, b_lon, stop_name=b_name, trip_type=t_type, target_datetime=boarding_dt, location="boarding")
+                                wa = weather_api.get_weather_forecast_by_coords(a_lat, a_lon, stop_name=a_name, trip_type=t_type, target_datetime=boarding_dt, location="destination")
                                 
                                 integrated_ai_text = get_integrated_ai_message(wb, wa, b_name, a_name)
                                 is_l = "퇴근" in str(r_name)
@@ -583,17 +586,20 @@ with main_tab_target:
         
         board_lat = float(board_row.get('lat', 37.3947))
         board_lon = float(board_row.get('lon', 127.1111))
+        boarding_target = weather_api.resolve_boarding_datetime(board_row.get('arrival_time'))
+        weather_selection_key = (sel_region, sel_route, sel_board_stop, sel_arrive_stop,
+                                 boarding_target.isoformat() if boarding_target else None)
         
         st.markdown("")
         b1, b2, b3 = st.columns(3)
         with b1:
             if st.button("🔍 탑승·하차 통합 날씨 조회", type="primary", width='stretch'):
                 with st.spinner("탑승지와 하차지의 기상청 날씨 및 AI 통합 코멘트 생성 중..."):
-                    w_board = weather_api.get_weather_forecast_by_coords(board_lat, board_lon, stop_name=sel_board_stop, trip_type=trip_type)
-                    w_arrive = weather_api.get_weather_forecast_by_coords(arrive_lat, arrive_lon, stop_name=sel_arrive_stop, trip_type=trip_type)
+                    w_board = weather_api.get_weather_forecast_by_coords(board_lat, board_lon, stop_name=sel_board_stop, trip_type=trip_type, target_datetime=boarding_target, location="boarding")
+                    w_arrive = weather_api.get_weather_forecast_by_coords(arrive_lat, arrive_lon, stop_name=sel_arrive_stop, trip_type=trip_type, target_datetime=boarding_target, location="destination")
                 st.session_state['w_board'] = w_board
                 st.session_state['w_arrive'] = w_arrive
-                st.session_state['integrated_stop_key'] = f"{sel_route}_{sel_board_stop}_{sel_arrive_stop}"
+                st.session_state['integrated_stop_key'] = weather_selection_key
         
         user_id = st.session_state["user_info"]["id"] if st.session_state["user_info"] else "guest"
         user_data_obj = get_user_data(user_id)
@@ -608,7 +614,7 @@ with main_tab_target:
                         "board_stop": sel_board_stop,
                         "arrive_stop": sel_arrive_stop,
                         "trip_type": trip_type,
-                        "board_time": board_row.get('arrival_time', '08:00'),
+                        "board_time": board_row.get('arrival_time', ''),
                         "arrive_time": "-" if is_leave else arrive_row.get('arrival_time', '-'),
                         "board_lat": board_lat,
                         "board_lon": board_lon,
@@ -633,9 +639,9 @@ with main_tab_target:
                 if st.button("💬 카카오톡 통합 날씨 전송", width='stretch'):
                     wb = st.session_state.get('w_board')
                     wa = st.session_state.get('w_arrive')
-                    if not wb or st.session_state.get('integrated_stop_key') != f"{sel_route}_{sel_board_stop}_{sel_arrive_stop}":
-                        wb = weather_api.get_weather_forecast_by_coords(board_lat, board_lon, stop_name=sel_board_stop, trip_type=trip_type)
-                        wa = weather_api.get_weather_forecast_by_coords(arrive_lat, arrive_lon, stop_name=sel_arrive_stop, trip_type=trip_type)
+                    if not wb or st.session_state.get('integrated_stop_key') != weather_selection_key:
+                        wb = weather_api.get_weather_forecast_by_coords(board_lat, board_lon, stop_name=sel_board_stop, trip_type=trip_type, target_datetime=boarding_target, location="boarding")
+                        wa = weather_api.get_weather_forecast_by_coords(arrive_lat, arrive_lon, stop_name=sel_arrive_stop, trip_type=trip_type, target_datetime=boarding_target, location="destination")
                     
                     integrated_ai_text = get_integrated_ai_message(wb, wa, sel_board_stop, sel_arrive_stop)
                     arrive_time_str = "" if is_leave else (f" ({arrive_row.get('arrival_time', '-')})" if arrive_row.get('arrival_time') else "")
@@ -657,7 +663,7 @@ with main_tab_target:
             else:
                 st.button("💬 카카오톡 (로그인필요)", width='stretch', disabled=True)
 
-        if 'w_board' in st.session_state and 'w_arrive' in st.session_state and st.session_state.get('integrated_stop_key') == f"{sel_route}_{sel_board_stop}_{sel_arrive_stop}":
+        if 'w_board' in st.session_state and 'w_arrive' in st.session_state and st.session_state.get('integrated_stop_key') == weather_selection_key:
             wb = st.session_state['w_board']
             wa = st.session_state['w_arrive']
             
@@ -669,7 +675,7 @@ with main_tab_target:
             res_col1, res_col2 = st.columns(2)
             with res_col1:
                 st.markdown(f"#### 🟢 탑승지: {sel_board_stop}")
-                st.caption(f"예정 시간: {board_row.get('arrival_time', '-')}")
+                st.caption(f"탑승 예정 시간: {boarding_target:%Y-%m-%d %H:%M}" if boarding_target else "등록된 탑승시간 없음")
                 m1, m2 = st.columns(2)
                 m1.metric("기온", wb["temperature"])
                 m2.metric("하늘상태", wb["sky_status"])

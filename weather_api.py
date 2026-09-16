@@ -4,7 +4,7 @@ import re
 import requests
 from dotenv import load_dotenv
 from google import genai
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import urllib.parse
 import logging
 
@@ -216,162 +216,203 @@ def save_routes_with_sequential_geocoding(parsed_data, target_region="gyeonggi",
     print(f"[LOG] 지역별 병합 저장 완료. 총 데이터 수: {len(final_results)}개")
     return final_results
 
-def get_weather_forecast_by_coords(lat, lon, stop_name="", trip_type="출근길"):
-    nx, ny = latlon_to_grid(lat, lon)
-    
-    now = datetime.now()
-    target_time = now - timedelta(minutes=45)
-    base_date = target_time.strftime("%Y%m%d")
-    hour = target_time.hour
-    
-    base_hours = [2, 5, 8, 11, 14, 17, 20, 23]
-    valid_hour = 2
-    if hour < 2:
-        target_time = now - timedelta(days=1)
-        base_date = target_time.strftime("%Y%m%d")
-        valid_hour = 23
-    else:
-        for h in base_hours:
-            if hour >= h:
-                valid_hour = h
-                
-    base_time = f"{valid_hour:02d}00"
-    
-    url = "http://apis.data.go.kr/1360000/VilageFcstInfoService_2.0/getVilageFcst"
-    decoded_service_key = urllib.parse.unquote(KMA_API_KEY) if KMA_API_KEY else ""
+# All timetable/API times are Korea Standard Time, including on Windows.
+KST = timezone(timedelta(hours=9))
 
-    params = {
-        "serviceKey": decoded_service_key,
-        "pageNo": "1",
-        "numOfRows": "1000",
-        "dataType": "JSON",
-        "base_date": base_date,
-        "base_time": base_time,
-        "nx": nx,
-        "ny": ny
-    }
-    
-    print(f"[LOG KMA] 날씨 요청 시작 -> 정류장: {stop_name}, 좌표: ({lat}, {lon}) -> 격자: ({nx}, {ny})")
-    print(f"[LOG KMA] API 발표 기준일시(base): {base_date} {base_time}")
-    
-    temp = "정보 없음"
-    sky = "정보 없음"
-    pop = "정보 없음"
-    
+
+def korea_now():
+    return datetime.now(KST)
+
+
+def as_kst(value):
+    return value.replace(tzinfo=KST) if value.tzinfo is None else value.astimezone(KST)
+
+
+def resolve_boarding_datetime(board_time, now=None):
+    """Next occurrence of an existing HH:MM timetable entry; never invent a time.
+
+    A time in the current minute still means today's departure. Past times mean
+    tomorrow, not the next working day (the route data has no service calendar).
+    """
+    now = as_kst(now or korea_now())
+    if not isinstance(board_time, str) or not re.fullmatch(r"\s*\d{1,2}\s*:\s*\d{2}\s*", board_time):
+        return None
     try:
-        res = requests.get(url, params=params, timeout=5)
-        if res.status_code == 200:
-            res_json = res.json()
-            response_body = res_json.get("response", {}).get("body", {})
-            items = response_body.get("items", {}).get("item", [])
-            
-            # 시간별 데이터 딕셔너리로 구조화
-            forecast_map = {}
-            for item in items:
-                f_date = item.get("fcstDate")
-                f_time = item.get("fcstTime")
-                category = item.get("category")
-                value = item.get("fcstValue")
-                
-                key = (f_date, f_time)
-                if key not in forecast_map:
-                    forecast_map[key] = {}
-                forecast_map[key][category] = value
-            
-            # 현재 시각 기준 매칭 키 생성 (정각 단위)
-            target_fcst_date = now.strftime("%Y%m%d")
-            target_fcst_time = f"{now.hour:02d}00"
-            target_key = (target_fcst_date, target_fcst_time)
-            
-            print(f"[LOG KMA] 찾고자 하는 목표 예보 시각: {target_fcst_date} {target_fcst_time}")
-            
-            matched_data = None
-            matched_time_str = ""
-            
-            if target_key in forecast_map:
-                matched_data = forecast_map[target_key]
-                matched_time_str = f"{target_fcst_date} {target_fcst_time}"
-            else:
-                # 정확히 일치하는 시간이 없으면 이후 시간대 중 가장 가까운 시간 탐색
-                sorted_keys = sorted(forecast_map.keys())
-                for k in sorted_keys:
-                    if k[0] == target_fcst_date and k[1] >= target_fcst_time:
-                        matched_data = forecast_map[k]
-                        matched_time_str = f"{k[0]} {k[1]}"
-                        break
-                # 오늘 남은 시간 데이터가 없다면 오늘의 마지막 데이터 사용
-                if not matched_data and sorted_keys:
-                    today_keys = [k for k in sorted_keys if k[0] == target_fcst_date]
-                    if today_keys:
-                        matched_data = forecast_map[today_keys[-1]]
-                        matched_time_str = f"{today_keys[-1][0]} {today_keys[-1][1]}"
-            
-            if matched_data:
-                print(f"[LOG KMA] 최종 매칭된 예보 시각: {matched_time_str}")
-                if "TMP" in matched_data:
-                    temp = f"{matched_data['TMP']}°C"
-                if "SKY" in matched_data:
-                    sky_map = {"1": "맑음", "3": "구름많음", "4": "흐림"}
-                    sky = sky_map.get(str(matched_data['SKY']), "정보 없음")
-                if "POP" in matched_data:
-                    pop = f"{matched_data['POP']}%"
-        else:
-            print(f"[LOG ERROR KMA] API 호출 실패 (Status Code: {res.status_code})")
-    except Exception as e:
-        print(f"[LOG ERROR KMA] 요청 중 예외 발생: {type(e).__name__} - {str(e)}")
-        
-    print(f"[LOG KMA] 파싱 결과 -> 기온: {temp}, 하늘: {sky}, 강수확률: {pop}")
-    
-    if temp == "정보 없음":
-        logger.warning("Weather unavailable for grid %s,%s", nx, ny)
-        return {
-            "available": False,
-            "temperature": "정보 없음", "sky_status": "정보 없음",
-            "rain_probability": "정보 없음",
-            "calculated_grid": f"격자 좌표: NX={nx}, NY={ny}",
-            "message": "날씨 정보를 불러오지 못했습니다. 잠시 후 다시 조회해 주세요.",
-        }
+        hour, minute = map(int, board_time.split(":"))
+        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    except ValueError:
+        return None
+    if target < now.replace(second=0, microsecond=0):
+        target += timedelta(days=1)
+    return target
 
-    ai_message = f"{stop_name} 정류장 주변 {trip_type} 날씨입니다. 안전한 이동 되세요!"
-    if GEMINI_API_KEY and client:
-        try:
-            if trip_type == "퇴근길":
-                role_guide = "하루 일과를 마치고 돌아오는 피곤한 직장인을 위한 퇴근길 멘트입니다. 저녁 시간대 날씨 변화나 따뜻한 위로, 야외 활동 시 유의사항을 담아주세요."
-            else:
-                role_guide = "상쾌하고 바쁜 아침 출근길 직장인을 위한 멘트입니다. 옷차림이나 대중교통 이용 시 날씨 유의사항을 담아주세요."
 
-            prompt = (
-                f"당신은 센스 있는 스마트 셔틀버스 날씨 알림이입니다.\n"
-                f"정류장: {stop_name}\n"
-                f"시간대: {trip_type}\n"
-                f"- 기온: {temp}\n"
-                f"- 하늘 상태: {sky}\n"
-                f"- 강수 확률: {pop}\n\n"
-                f"{role_guide}\n"
-                f"위 내용을 바탕으로 친근하고 자연스러운 한두 줄의 짧은 코멘트를 작성해주세요. 사용자에게 보낼 단 하나의 자연스럽고 센스 있는 AI 코멘트 문장만 생성해."
-            )
-            
-            models_to_try = ["gemini-3.6-flash"]
-            for m_name in models_to_try:
-                try:
-                    response = client.models.generate_content(
-                        model=m_name,
-                        contents=prompt
-                    )
-                    if response and response.text:
-                        ai_message = response.text.strip()
-                        break
-                except Exception as exc:
-                    logger.warning("Weather comment generation failed: %s", type(exc).__name__)
-                    continue
-        except Exception:
-            pass
+def forecast_base(now, source):
+    now = as_kst(now)
+    if source == "UltraSrtFcst":
+        # Official getUltraSrtFcst guide: HH:30 production, available HH:45.
+        base = now.replace(minute=30, second=0, microsecond=0)
+        return base if now.minute >= 45 else base - timedelta(hours=1)
+    # Official getVilageFcst guide: 02/05/.../23, available ten minutes later.
+    available = now - timedelta(minutes=10)
+    base = available.replace(minute=0, second=0, microsecond=0)
+    while base.hour not in (2, 5, 8, 11, 14, 17, 20, 23):
+        base -= timedelta(hours=1)
+    return base
 
-    return {
-        "available": True,
-        "temperature": temp,
-        "sky_status": sky,
-        "rain_probability": pop,
-        "calculated_grid": f"격자 좌표: NX={nx}, NY={ny}",
-        "message": ai_message
+
+def _request_forecast(source, base, nx, ny):
+    params = {
+        "serviceKey": urllib.parse.unquote(KMA_API_KEY or ""),
+        "pageNo": "1", "numOfRows": "1000", "dataType": "JSON",
+        "base_date": base.strftime("%Y%m%d"), "base_time": base.strftime("%H%M"),
+        "nx": nx, "ny": ny,
     }
+    try:
+        res = requests.get(
+            f"https://apis.data.go.kr/1360000/VilageFcstInfoService_2.0/get{source}",
+            params=params, timeout=8)
+        if res.status_code != 200:
+            print(f"[WEATHER] source={source} HTTP={res.status_code}")
+            return {}
+        response = res.json().get("response", {})
+        code = response.get("header", {}).get("resultCode")
+        if code != "00":
+            # Do not print response bodies or exceptions containing serviceKey URLs.
+            print(f"[WEATHER] source={source} invalid_or_error_response")
+            return {}
+        items = response.get("body", {}).get("items", {}).get("item", [])
+        forecast = {}
+        for item in items:
+            try:
+                stamp = datetime.strptime(item["fcstDate"] + item["fcstTime"], "%Y%m%d%H%M").replace(tzinfo=KST)
+                forecast.setdefault(stamp, {})[item["category"]] = item["fcstValue"]
+            except (KeyError, TypeError, ValueError):
+                continue
+        return forecast
+    except Exception as exc:
+        print(f"[WEATHER] source={source} request_failed={type(exc).__name__}")
+        return {}
+
+
+def _number(value):
+    try:
+        number = float(value)
+        return number if -100 < number < 1000 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _has_precipitation(values):
+    pty = _number(values.get("PTY"))
+    if pty in (1, 2, 3, 4, 5, 6, 7):
+        return True
+    for key in ("RN1", "PCP"):
+        amount = str(values.get(key, ""))
+        if amount in ("", "강수없음", "없음", "정보 없음"):
+            continue
+        match = re.search(r"[-+]?\d+(?:\.\d+)?", amount)
+        if match and float(match.group()) > 0:
+            return True
+    pop = _number(values.get("POP"))
+    # Probability alone is a possibility, never a claim that precipitation occurs.
+    return pop is not None and 60 <= pop <= 100
+
+
+def precipitation_note(forecast, target_hour, source):
+    end = target_hour + timedelta(hours=2) if source == "UltraSrtFcst" else target_hour
+    window = [{"time": stamp.strftime("%Y-%m-%d %H:%M"),
+               **{k: row[k] for k in ("PTY", "RN1", "POP", "PCP") if k in row}}
+              for stamp, row in sorted(forecast.items()) if target_hour <= stamp <= end]
+    if _has_precipitation(forecast.get(target_hour, {})):
+        note = "탑승 시간대 강수 가능성이 있으니 우산을 챙기세요."
+    elif any(_has_precipitation(row) for stamp, row in forecast.items() if target_hour < stamp <= end):
+        note = "탑승 후 1~2시간 이내 강수 가능성이 있으니 우산을 챙기는 것이 좋겠습니다."
+    else:
+        note = ""
+    return note, window
+
+
+def _unavailable(message, target=None):
+    return {"available": False, "temperature": "정보 없음", "sky_status": "정보 없음",
+            "rain_probability": "정보 없음", "message": message,
+            "target_time": target.isoformat() if target else None, "precipitation_note": ""}
+
+
+def get_weather_forecast_by_coords(lat, lon, stop_name="", trip_type="출근길",
+                                   target_datetime=None, location="boarding", now=None):
+    now = as_kst(now or korea_now())
+    if not isinstance(target_datetime, datetime):
+        return _unavailable("탑승 예정시간이 등록되어 있지 않아 날씨 정보를 불러오지 못했습니다.")
+    target = as_kst(target_datetime)
+    target_hour = target.replace(minute=0, second=0, microsecond=0)
+    try:
+        nx, ny = latlon_to_grid(float(lat), float(lon))
+    except (TypeError, ValueError, OverflowError):
+        return _unavailable("정류장 위치를 확인할 수 없어 날씨 정보를 불러오지 못했습니다.", target)
+    source = "UltraSrtFcst" if timedelta(minutes=-1) < target - now <= timedelta(hours=4) else "VilageFcst"
+    base = forecast_base(now, source)
+    forecast = _request_forecast(source, base, nx, ny)
+
+    def usable(rows, kind):
+        row = rows.get(target_hour, {})
+        return _number(row.get("T1H" if kind == "UltraSrtFcst" else "TMP")) is not None and str(row.get("SKY")) in ("1", "3", "4")
+
+    if source == "UltraSrtFcst" and not usable(forecast, source):
+        print("[WEATHER] UltraSrtFcst target unavailable -> fallback to VilageFcst")
+        source = "VilageFcst"
+        base = forecast_base(now, source)
+        forecast = _request_forecast(source, base, nx, ny)
+    if source == "VilageFcst" and not usable(forecast, source):
+        # A just-published forecast can start after the current boarding hour.
+        # Try only the immediately preceding release; never substitute another hour.
+        base -= timedelta(hours=3)
+        forecast = _request_forecast(source, base, nx, ny)
+    if not usable(forecast, source):
+        print(f"[WEATHER] location={location} target={target:%Y-%m-%d %H:%M} unavailable")
+        return _unavailable("탑승 예정시간의 날씨 정보를 불러오지 못했습니다. 잠시 후 다시 조회해 주세요.", target)
+    row = forecast[target_hour]
+    temp = f"{_number(row.get('T1H' if source == 'UltraSrtFcst' else 'TMP')):g}°C"
+    sky = {"1": "맑음", "3": "구름많음", "4": "흐림"}[str(row["SKY"])]
+    pty = _number(row.get("PTY"))
+    sky = {1: "비", 2: "비/눈", 3: "눈", 4: "소나기", 5: "빗방울", 6: "빗방울/눈날림", 7: "눈날림"}.get(pty, sky)
+    pop_value = _number(row.get("POP"))
+    pop = f"{pop_value:g}%" if pop_value is not None and 0 <= pop_value <= 100 else "정보 없음"
+    rain_note, rain_window = precipitation_note(forecast, target_hour, source)
+    print(f"[WEATHER] location={location} target={target:%Y-%m-%d %H:%M} source={source} "
+          f"base={base:%Y-%m-%d %H:%M} selected={target_hour:%Y-%m-%d %H:%M} "
+          f"temperature={temp} precipitation_slots={len(rain_window)}")
+    ai_message = f"{stop_name}의 {target:%m월 %d일 %H:%M} 탑승 시간대에는 {temp}, {sky}으로 예상됩니다. 안전한 이동 되세요!"
+    if GEMINI_API_KEY and client:
+        role_guide = ("하루 일과를 마친 직장인을 위한 자연스러운 퇴근길 안내와 옷차림 조언입니다."
+                      if trip_type == "퇴근길" else "바쁜 아침 직장인을 위한 자연스러운 출근길 안내와 옷차림 조언입니다.")
+        prompt = (
+            f"당신은 센스 있는 스마트 셔틀버스 날씨 알림이입니다.\n정류장: {stop_name}\n시간대: {trip_type}\n"
+            f"위치 역할: {'하차지 (이곳에서 탑승한다고 표현하지 마세요)' if location == 'destination' else '탑승지'}\n"
+            f"탑승 예정시각: {target:%Y-%m-%d %H:%M} (한국시간)\n예보 시간대: {target_hour:%Y-%m-%d %H:%M}\n"
+            f"- 예상 기온: {temp}\n- 하늘 상태: {sky}\n- 강수 확률: {pop}\n"
+            f"실제 제공된 강수 자료: {json.dumps(rain_window, ensure_ascii=False)}\n"
+            f"{role_guide}\n"
+            "이것은 현재 날씨가 아닌 탑승 예정시간의 예보입니다. '현재', '지금', '오늘'이라고 표현하지 말고 "
+            "'탑승 시간대에는', '출근/퇴근 시간에는 예상됩니다'처럼 안내하세요. "
+            "두 위치 모두 같은 셔틀 탑승 시각 기준이며 하차시각이나 이동시간은 추정하지 마세요. "
+            "하차지에서도 반드시 탑승 예정시간 기준이라고 표현하고 내리실 때나 도착 시간대의 날씨라고 말하지 마세요. "
+            "자료에 없는 기상 변화나 강수를 추정하지 마세요. 강수 및 우산 안내는 통합 단계에서 별도로 붙이므로 "
+            "여기서는 비/눈/우산에 대한 언급 없이 옷차림과 출퇴근 조언을 친근한 한두 문장으로 작성하세요. "
+            "API 종류나 기술적인 자료 출처는 언급하지 마세요."
+        )
+        try:
+            response = client.models.generate_content(
+                model="gemini-3.6-flash", contents=prompt,
+                config={"http_options": {"timeout": 20000, "retry_options": {"attempts": 1}}})
+            text = response.text.strip() if response and response.text else ""
+            # Keep the safe deterministic text if a model violates the time/source rules.
+            arrival_claim = location == "destination" and re.search(
+                r"내리실|내릴|도착하|하차하|도착\s*(?:시간|시각|시점)|하차\s*(?:시간|시각|시점)", text)
+            if text and not arrival_claim and not any(word in text for word in ("현재", "지금", "오늘", "초단기", "단기예보", "Fcst")):
+                ai_message = text
+        except Exception as exc:
+            print(f"[WEATHER] comment_failed={type(exc).__name__}")
+    return {"available": True, "temperature": temp, "sky_status": sky, "rain_probability": pop,
+            "calculated_grid": f"격자 좌표: NX={nx}, NY={ny}", "message": ai_message,
+            "target_time": target.isoformat(), "precipitation_note": rain_note}

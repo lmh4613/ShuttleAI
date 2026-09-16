@@ -82,7 +82,7 @@ class DemoTests(unittest.TestCase):
                        Mock(status_code=200, json=Mock(return_value={}))]:
             kwargs = {"side_effect": result} if isinstance(result, Exception) else {"return_value": result}
             with patch.object(weather_api.requests, "get", **kwargs), patch.object(weather_api, "client") as ai:
-                weather = weather_api.get_weather_forecast_by_coords(37.4, 127.1)
+                weather = weather_api.get_weather_forecast_by_coords(37.4, 127.1, target_datetime=weather_api.korea_now())
                 self.assertFalse(weather["available"])
                 self.assertEqual(weather["temperature"], "정보 없음")
                 ai.models.generate_content.assert_not_called()
@@ -166,6 +166,29 @@ class AppFlowTests(unittest.TestCase):
             self.assertEqual(len(app.exception), 0)
             self.assertGreater(len(app.error), 0)
         self.mock_api.assert_not_called()
+
+    def test_boarding_forecast_pair_and_existing_comment_ui(self):
+        app = self.login(12345)
+        target = weather_api.resolve_boarding_datetime("17:25")
+        weather = {"available": True, "temperature": "21°C", "sky_status": "맑음",
+                   "rain_probability": "정보 없음", "message": "탑승 시간대에는 가벼운 겉옷을 준비하세요.",
+                   "precipitation_note": "탑승 후 1~2시간 이내 강수 가능성이 있으니 우산을 챙기세요."}
+        with patch.object(weather_api, "get_weather_forecast_by_coords", return_value=weather) as fetch:
+            next(b for b in app.button if b.label == "🔍 탑승·하차 통합 날씨 조회").click().run()
+        self.assertEqual(len(app.exception), 0)
+        self.assertEqual(fetch.call_count, 2)
+        first, second = [call.kwargs for call in fetch.call_args_list]
+        self.assertEqual(first["target_datetime"], target)
+        self.assertEqual(first["target_datetime"], second["target_datetime"])
+        self.assertEqual([first["location"], second["location"]], ["boarding", "destination"])
+        comments = [i.value for i in app.info if "통합 AI 코멘트" in i.value]
+        self.assertEqual(len(comments), 1)
+        self.assertIn("기온 차이", comments[0])
+        self.assertIn("우산", comments[0])
+        visible = " ".join(e.value for collection in (app.info, app.caption, app.markdown) for e in collection)
+        for internal in ("UltraSrtFcst", "VilageFcst", "초단기예보", "단기예보"):
+            self.assertNotIn(internal, visible)
+        self.assertIn(target.strftime("%Y-%m-%d %H:%M"), visible)
 
     def test_weather_failure_ui_and_message_failure(self):
         app = self.login(12345)
