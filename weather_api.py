@@ -319,8 +319,8 @@ def _has_precipitation(values):
     return pop is not None and 60 <= pop <= 100
 
 
-def precipitation_note(forecast, target_hour, source):
-    end = target_hour + timedelta(hours=2) if source == "UltraSrtFcst" else target_hour
+def precipitation_note(forecast, target_hour, source, boarding_target=None):
+    end = (boarding_target or target_hour) + timedelta(hours=2) if source == "UltraSrtFcst" else target_hour
     window = [{"time": stamp.strftime("%Y-%m-%d %H:%M"),
                **{k: row[k] for k in ("PTY", "RN1", "POP", "PCP") if k in row}}
               for stamp, row in sorted(forecast.items()) if target_hour <= stamp <= end]
@@ -345,7 +345,7 @@ def get_weather_forecast_by_coords(lat, lon, stop_name="", trip_type="출근길"
     if not isinstance(target_datetime, datetime):
         return _unavailable("탑승 예정시간이 등록되어 있지 않아 날씨 정보를 불러오지 못했습니다.")
     target = as_kst(target_datetime)
-    target_hour = target.replace(minute=0, second=0, microsecond=0)
+    target_hour = (target + timedelta(minutes=30)).replace(minute=0, second=0, microsecond=0)
     try:
         nx, ny = latlon_to_grid(float(lat), float(lon))
     except (TypeError, ValueError, OverflowError):
@@ -378,41 +378,44 @@ def get_weather_forecast_by_coords(lat, lon, stop_name="", trip_type="출근길"
     sky = {1: "비", 2: "비/눈", 3: "눈", 4: "소나기", 5: "빗방울", 6: "빗방울/눈날림", 7: "눈날림"}.get(pty, sky)
     pop_value = _number(row.get("POP"))
     pop = f"{pop_value:g}%" if pop_value is not None and 0 <= pop_value <= 100 else "정보 없음"
-    rain_note, rain_window = precipitation_note(forecast, target_hour, source)
+    rain_note, rain_window = precipitation_note(forecast, target_hour, source, target)
     print(f"[WEATHER] location={location} target={target:%Y-%m-%d %H:%M} source={source} "
           f"base={base:%Y-%m-%d %H:%M} selected={target_hour:%Y-%m-%d %H:%M} "
           f"temperature={temp} precipitation_slots={len(rain_window)}")
-    ai_message = f"{stop_name}의 {target:%m월 %d일 %H:%M} 탑승 시간대에는 {temp}, {sky}으로 예상됩니다. 안전한 이동 되세요!"
-    if GEMINI_API_KEY and client:
-        role_guide = ("하루 일과를 마친 직장인을 위한 자연스러운 퇴근길 안내와 옷차림 조언입니다."
-                      if trip_type == "퇴근길" else "바쁜 아침 직장인을 위한 자연스러운 출근길 안내와 옷차림 조언입니다.")
-        prompt = (
-            f"당신은 센스 있는 스마트 셔틀버스 날씨 알림이입니다.\n정류장: {stop_name}\n시간대: {trip_type}\n"
-            f"위치 역할: {'하차지 (이곳에서 탑승한다고 표현하지 마세요)' if location == 'destination' else '탑승지'}\n"
-            f"탑승 예정시각: {target:%Y-%m-%d %H:%M} (한국시간)\n예보 시간대: {target_hour:%Y-%m-%d %H:%M}\n"
-            f"- 예상 기온: {temp}\n- 하늘 상태: {sky}\n- 강수 확률: {pop}\n"
-            f"실제 제공된 강수 자료: {json.dumps(rain_window, ensure_ascii=False)}\n"
-            f"{role_guide}\n"
-            "이것은 현재 날씨가 아닌 탑승 예정시간의 예보입니다. '현재', '지금', '오늘'이라고 표현하지 말고 "
-            "'탑승 시간대에는', '출근/퇴근 시간에는 예상됩니다'처럼 안내하세요. "
-            "두 위치 모두 같은 셔틀 탑승 시각 기준이며 하차시각이나 이동시간은 추정하지 마세요. "
-            "하차지에서도 반드시 탑승 예정시간 기준이라고 표현하고 내리실 때나 도착 시간대의 날씨라고 말하지 마세요. "
-            "자료에 없는 기상 변화나 강수를 추정하지 마세요. 강수 및 우산 안내는 통합 단계에서 별도로 붙이므로 "
-            "여기서는 비/눈/우산에 대한 언급 없이 옷차림과 출퇴근 조언을 친근한 한두 문장으로 작성하세요. "
-            "API 종류나 기술적인 자료 출처는 언급하지 마세요."
-        )
-        try:
-            response = client.models.generate_content(
-                model="gemini-3.6-flash", contents=prompt,
-                config={"http_options": {"timeout": 20000, "retry_options": {"attempts": 1}}})
-            text = response.text.strip() if response and response.text else ""
-            # Keep the safe deterministic text if a model violates the time/source rules.
-            arrival_claim = location == "destination" and re.search(
-                r"내리실|내릴|도착하|하차하|도착\s*(?:시간|시각|시점)|하차\s*(?:시간|시각|시점)", text)
-            if text and not arrival_claim and not any(word in text for word in ("현재", "지금", "오늘", "초단기", "단기예보", "Fcst")):
-                ai_message = text
-        except Exception as exc:
-            print(f"[WEATHER] comment_failed={type(exc).__name__}")
+    # Preserve actual precipitation fields for deterministic preparation advice.
+    wet_slots = [slot for slot in rain_window if _has_precipitation(slot)]
+    selected_time = target_hour.strftime("%Y-%m-%d %H:%M")
+    direct = lambda slot: _has_precipitation({k: v for k, v in slot.items() if k != "POP"})
+    if any(slot['time'] == selected_time and direct(slot) for slot in wet_slots):
+        rain_status = "boarding"
+    elif any(slot['time'] != selected_time and direct(slot) for slot in wet_slots):
+        rain_status = "during_trip"
+    elif wet_slots:
+        rain_status = "possible"
+    else:
+        rain_status = "none"
+    relevant = [slot for slot in wet_slots if direct(slot) and
+                (slot['time'] == selected_time if rain_status == 'boarding' else slot['time'] != selected_time)]
+    kinds = set()
+    for slot in relevant:
+        pty_value = _number(slot.get('PTY'))
+        if pty_value in (2, 6):
+            kinds.update(('rain', 'snow'))
+        elif pty_value in (3, 7):
+            kinds.add('snow')
+        elif pty_value in (1, 4, 5) or _has_precipitation({'RN1': slot.get('RN1')}):
+            kinds.add('rain')
+        else:
+            kinds.add('unknown')
+    rain_type = ('mixed' if {'rain', 'snow'} <= kinds else
+                 next(iter(kinds)) if len(kinds) == 1 else 'unknown')
+    if rain_status == 'possible':
+        rain_type = 'rain'  # POP-only wording stays explicitly probabilistic.
+    # Weather commentary no longer needs a model call; coordinate lookup still uses Gemini.
+    ai_message = ""
     return {"available": True, "temperature": temp, "sky_status": sky, "rain_probability": pop,
             "calculated_grid": f"격자 좌표: NX={nx}, NY={ny}", "message": ai_message,
-            "target_time": target.isoformat(), "precipitation_note": rain_note}
+            "target_time": target.isoformat(), "precipitation_note": rain_note,
+            "precipitation_status": rain_status, "precipitation_window": rain_window,
+            "precipitation_type": rain_type,
+            "precipitation_certainty": "forecast" if relevant else "possible"}

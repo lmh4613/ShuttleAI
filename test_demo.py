@@ -20,6 +20,16 @@ def app_functions(*names):
 
 
 class DemoTests(unittest.TestCase):
+    def test_route_options_preserve_order_and_defaults(self):
+        options = app_functions('route_stop_options')['route_stop_options']
+        stops = ['A', 'B', 'D (하차만)', 'E (하차만)', '판교']
+        board, arrival = options(stops, False)
+        self.assertEqual(board, ['A', 'B', '판교'])
+        self.assertEqual(arrival, ['판교 제2테크노밸리', 'D (하차만)', 'E (하차만)'])
+        self.assertEqual(options(stops, True), (['A'], stops))
+        self.assertEqual(options(['A', 'B'], False)[1], ['판교 제2테크노밸리'])
+        self.assertEqual(stops, ['A', 'B', 'D (하차만)', 'E (하차만)', '판교'])
+
     def test_signed_temperatures(self):
         parse = app_functions("parse_temp")["parse_temp"]
         for value, expected in [("-5°C", -5), ("+5°C", 5), ("23°C", 23),
@@ -104,8 +114,14 @@ class AppFlowTests(unittest.TestCase):
         self.source = self.source.replace('\nstart_background_scheduler()\n', '\n# scheduler disabled in test\n')
         self.api = patch("demo_support.api_request")
         self.mock_api = self.api.start()
+        # Production comment calls are mocked; legacy UI tests never contact Gemini.
+        self.comment_client = patch('weather_comment_ai.get_client', return_value=None)
+        self.comment_client.start()
+        from weather_comment_ai import clear_cache
+        clear_cache()
 
     def tearDown(self):
+        self.comment_client.stop()
         self.api.stop()
         self.temp.cleanup()
 
@@ -121,6 +137,8 @@ class AppFlowTests(unittest.TestCase):
 
     def test_new_user_role_selection_and_favorite(self):
         app = self.login(12345)
+        self.assertTrue(app.selectbox(key="user_board_st").disabled)
+        self.assertEqual(len(app.selectbox(key="user_board_st").options), 1)
         self.assertFalse(app.session_state["is_admin"])
         self.assertEqual(app.selectbox(key="user_reg").value, "seoul")
         self.assertEqual(app.selectbox(key="user_rt").value, "(퇴근) 노원")
@@ -142,11 +160,105 @@ class AppFlowTests(unittest.TestCase):
         self.assertEqual(len(app.tabs), 1)
         next(b for b in app.button if b.label == "⭐ 통합 즐겨찾기 추가").click().run()
         self.assertEqual(len(app.exception), 0)
+
         next(b for b in app.button if b.label == "관리자 모드로 돌아가기").click().run()
         self.assertTrue(app.session_state["is_admin"])
         self.assertFalse(app.session_state["preview_user"])
         self.assertEqual({key: app.selectbox(key=key).value for key in support.SELECTION_KEYS}, before)
         self.assertEqual(len(app.exception), 0)
+
+    def test_weather_preview_admin_only_and_user_mode_cleanup(self):
+        admin = self.login(5070327065)
+        self.assertTrue(any(e.label == '🧪 날씨 코멘트 테스트' for e in admin.expander))
+        real_selection = {key: admin.selectbox(key=key).value for key in support.SELECTION_KEYS}
+        with patch('weather_advice_preview.generate_preview', wraps=__import__('weather_advice_preview').generate_preview) as generate:
+            admin.selectbox(key='weather_preview_scenario').select('명확한 눈 예보 + 추운 날씨').run()
+            self.assertGreater(generate.call_count, 0)
+            self.assertEqual(len(admin.exception), 0)
+            self.assertTrue(any('눈이 예상됩니다' in i.value for i in admin.info))
+            self.assertEqual({key: admin.selectbox(key=key).value for key in support.SELECTION_KEYS}, real_selection)
+            with patch('weather_comment_ai.generate_once', return_value={
+                    'text': '출근길에는 눈이 예상됩니다. 따뜻한 외투를 챙기세요.',
+                    'source': 'gemini', 'reason': ''}) as ai:
+                admin.button(key='weather_preview_gemini_generate').click().run()
+                ai.assert_called_once()
+                self.assertIn('weather_preview_gemini_result', admin.session_state)
+            generate.reset_mock()
+            next(b for b in admin.button if b.label == '일반 사용자 모드로 보기').click().run()
+            generate.assert_not_called()
+            self.assertFalse(any(e.label == '🧪 날씨 코멘트 테스트' for e in admin.expander))
+            self.assertFalse(any(key.startswith('weather_preview_') for key in admin.session_state.filtered_state))
+            user = self.login(12345)
+            generate.assert_not_called()
+            self.assertFalse(any(e.label == '🧪 날씨 코멘트 테스트' for e in user.expander))
+            self.assertFalse(any('Gemini 문구 생성' in b.label or 'Gemini 코멘트 생성' in b.label for b in user.button))
+
+    def test_morning_dropoff_selection_coordinates_and_favorite(self):
+        fixtures = [dict(region='seoul', route_name=route, stop_name=name,
+                         arrival_time='07:10', lat=lat, lon=127.1)
+                    for route, name, lat in [('(퇴근) 노원', '퇴근 출발', 37.1),
+                                            ('출근 테스트', '탑승A', 37.2),
+                                            ('출근 테스트', 'D (하차만)', 37.3),
+                                            ('출근 테스트', 'E (하차만)', 37.4)]]
+        with patch.object(weather_api, 'load_routes_from_db', return_value=fixtures):
+            app = self.login(12345)
+            app.selectbox(key='user_rt').select('출근 테스트').run()
+            self.assertEqual(len(app.exception), 0)
+            self.assertEqual(app.selectbox(key='user_arrive_st_fixed').value, '판교 제2테크노밸리')
+            self.assertEqual(app.selectbox(key='user_board_st').options, ['탑승A'])
+            self.assertFalse(app.selectbox(key='user_board_st').disabled)
+            self.assertEqual(app.selectbox(key='user_arrive_st_fixed').options,
+                             ['판교 제2테크노밸리', 'D (하차만)', 'E (하차만)'])
+            app.selectbox(key='user_arrive_st_fixed').select('D (하차만)').run()
+            missing = weather_api._unavailable('날씨 정보를 불러오지 못했습니다.')
+            with patch.object(weather_api, 'get_weather_forecast_by_coords', return_value=missing) as fetch:
+                next(b for b in app.button if b.label == '🔍 탑승·하차 통합 날씨 조회').click().run()
+            self.assertEqual(fetch.call_args_list[1].args, (37.3, 127.1))
+            self.assertEqual(fetch.call_args_list[0].kwargs['target_datetime'],
+                             fetch.call_args_list[1].kwargs['target_datetime'])
+            next(b for b in app.button if b.label == '⭐ 통합 즐겨찾기 추가').click().run()
+            self.assertEqual(len(app.exception), 0)
+            favorite = json.loads(Path(self.data_file).read_text(encoding='utf-8'))['12345']['settings'][0]
+            self.assertEqual(favorite['arrive_stop'], 'D (하차만)')
+            self.assertEqual(favorite['arrive_lat'], 37.3)
+
+    def test_route_changes_reset_stops_even_when_names_overlap(self):
+        routes = {
+            '출근 A': ['A 기본', '공통 탑승', '공통 (하차만)'],
+            '출근 B': ['B 기본', '공통 탑승', '공통 (하차만)'],
+            '(퇴근) A': ['퇴근 A 출발', '공통 하차', 'A 종점'],
+            '(퇴근) B': ['퇴근 B 출발', '공통 하차', 'B 종점'],
+        }
+        fixtures = [dict(region='seoul', route_name=route, stop_name=stop,
+                         arrival_time='07:10', lat=37.3, lon=127.1)
+                    for route, stops in routes.items() for stop in stops]
+        with patch.object(weather_api, 'load_routes_from_db', return_value=fixtures):
+            app = self.AppTest.from_string(self.source).run(timeout=15)
+            for source, destination in [('출근 A', '출근 B'),
+                                        ('출근 B', '(퇴근) A'),
+                                        ('(퇴근) A', '(퇴근) B'),
+                                        ('(퇴근) B', '출근 A')]:
+                with self.subTest(source=source, destination=destination):
+                    app.selectbox(key='user_rt').select(source).run()
+                    if '퇴근' in source:
+                        app.selectbox(key='user_arrive_st').select('공통 하차').run()
+                    else:
+                        app.selectbox(key='user_board_st').select('공통 탑승').run()
+                        app.selectbox(key='user_arrive_st_fixed').select('공통 (하차만)').run()
+                        # An unrelated rerun must retain choices within the same route.
+                        app.run()
+                        self.assertEqual(app.selectbox(key='user_board_st').value, '공통 탑승')
+                        self.assertEqual(app.selectbox(key='user_arrive_st_fixed').value, '공통 (하차만)')
+                    app.selectbox(key='user_rt').select(destination).run()
+                    self.assertEqual(len(app.exception), 0)
+                    self.assertEqual(app.selectbox(key='user_board_st').value, routes[destination][0])
+                    self.assertEqual(app.selectbox(key='user_board_st').disabled, '퇴근' in destination)
+                    if '퇴근' in destination:
+                        self.assertEqual(app.selectbox(key='user_arrive_st').value, routes[destination][-1])
+                    else:
+                        self.assertEqual(app.selectbox(key='user_arrive_st_fixed').value, '판교 제2테크노밸리')
+                        self.assertIn('공통 (하차만)', app.selectbox(key='user_arrive_st_fixed').options)
+                        self.assertNotIn('공통 (하차만)', app.selectbox(key='user_board_st').options)
 
     def test_login_failure_shows_message(self):
         state = support.prepare_login(None, {"user_reg": "seoul"})
@@ -183,7 +295,8 @@ class AppFlowTests(unittest.TestCase):
         self.assertEqual([first["location"], second["location"]], ["boarding", "destination"])
         comments = [i.value for i in app.info if "통합 AI 코멘트" in i.value]
         self.assertEqual(len(comments), 1)
-        self.assertIn("기온 차이", comments[0])
+        self.assertIn('퇴근길', comments[0])
+        self.assertNotIn("기온 차이", comments[0])
         self.assertIn("우산", comments[0])
         visible = " ".join(e.value for collection in (app.info, app.caption, app.markdown) for e in collection)
         for internal in ("UltraSrtFcst", "VilageFcst", "초단기예보", "단기예보"):

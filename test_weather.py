@@ -59,8 +59,10 @@ class ForecastTests(unittest.TestCase):
         dry = dict(result, precipitation_note='')
         combine = app_functions('parse_temp', 'get_integrated_ai_message')['get_integrated_ai_message']
         message = combine(dry, result, '탑승A', '하차B')
-        for expected in ['탑승A', '하차B', '기온 차이', '탑승 후 1~2시간', '우산']:
+        for expected in ['탑승 후', '우산']:
             self.assertIn(expected, message)
+        self.assertNotIn('탑승A', message)
+        self.assertNotIn('하차B', message)
         self.assertNotIn('현재', message)
 
     def test_F_boarding_precipitation_and_available_fields(self):
@@ -127,40 +129,36 @@ class ForecastTests(unittest.TestCase):
             self.assertEqual(w._request_forecast('UltraSrtFcst', dt(14, 30), 60, 120), {})
         self.assertNotIn('SECRET', output.getvalue())
 
-    def test_K_prompt_time_and_reject_current_weather_wording(self):
+    def test_K_comment_does_not_call_gemini_or_repeat_weather(self):
         ai = Mock()
-        for generated in ['현재 21도입니다.', '탑승 시간대에는 가벼운 겉옷을 준비해 보세요.']:
-            ai.models.generate_content.return_value = Mock(text=generated)
-            with patch.object(w, 'client', ai), patch.object(w, 'GEMINI_API_KEY', 'test'):
-                result, _ = self.fetch(dt(15), dt(18, 10), [rows(18)])
-            prompt = ai.models.generate_content.call_args.kwargs['contents']
-            self.assertIn('2026-09-16 18:10', prompt)
-            self.assertIn('예상 기온: 21°C', prompt)
-            self.assertNotIn('현재', result['message'])
-            self.assertNotIn('Fcst', result['message'])
+        with patch.object(w, 'client', ai), patch.object(w, 'GEMINI_API_KEY', 'test'):
+            result, _ = self.fetch(dt(15), dt(18, 10), [rows(18)])
+        ai.models.generate_content.assert_not_called()
+        self.assertEqual(result['target_time'], dt(18, 10).isoformat())
+        self.assertEqual(result['message'], '')
 
     def test_destination_never_invents_arrival_weather(self):
-        ai = Mock()
-        ai.models.generate_content.return_value = Mock(text="도착 시간대에는 21도입니다.")
-        with patch.object(w, "client", ai), patch.object(w, "GEMINI_API_KEY", "test"), patch.object(w, "_request_forecast", return_value=rows(18)):
-            result = w.get_weather_forecast_by_coords(37.4, 127.1, stop_name="하차B",
-                         target_datetime=dt(18, 10), now=dt(15), location="destination")
-        self.assertIn("탑승 시간대", result["message"])
-        self.assertNotIn("도착 시간대", result["message"])
-        prompt = ai.models.generate_content.call_args.kwargs["contents"]
-        self.assertIn("위치 역할: 하차지", prompt)
-        self.assertIn("2026-09-16 18:10", prompt)
+        from weather_advice import assess_weather, render_advice
+        with patch.object(w, '_request_forecast', return_value=rows(18, T1H='21', SKY='1', PTY='1')):
+            result = w.get_weather_forecast_by_coords(37.4, 127.1, stop_name='하차B',
+                         target_datetime=dt(18, 10), now=dt(15), location='destination')
+        dry = dict(result, precipitation_status='none', precipitation_note='')
+        situation = assess_weather(dry, result)
+        self.assertEqual(situation['precipitation_status'], 'possible')
+        message = render_advice(situation)
+        self.assertIn('하차 지역', message)
+        self.assertNotIn('도착할 무렵', message)
+        self.assertNotIn('하차B', message)
 
-    def test_ai_timeout_keeps_real_weather_and_safe_comment(self):
+    def test_ai_timeout_cannot_affect_real_weather_or_comment(self):
+        from weather_advice import assess_weather, render_advice
         ai = Mock()
-        ai.models.generate_content.side_effect = TimeoutError("sensitive-url")
-        with patch.object(w, "client", ai), patch.object(w, "GEMINI_API_KEY", "test"):
+        ai.models.generate_content.side_effect = TimeoutError('sensitive-url')
+        with patch.object(w, 'client', ai), patch.object(w, 'GEMINI_API_KEY', 'test'):
             result, _ = self.fetch(dt(15), dt(18, 10), [rows(18)])
-        self.assertTrue(result["available"])
-        self.assertIn("탑승 시간대", result["message"])
-        self.assertNotIn("sensitive", result["message"])
-        self.assertEqual(ai.models.generate_content.call_args.kwargs["config"]["http_options"],
-                         {"timeout": 20000, "retry_options": {"attempts": 1}})
+        self.assertTrue(result['available'])
+        self.assertTrue(render_advice(assess_weather(result, result)))
+        ai.models.generate_content.assert_not_called()
 
     def test_actual_response_categories_and_dates_are_parsed(self):
         payload = {'response': {'header': {'resultCode': '00'}, 'body': {'items': {'item': [
@@ -171,6 +169,57 @@ class ForecastTests(unittest.TestCase):
         self.assertEqual(forecast[dt(0, 0, 17)], {'T1H': '-2', 'RN1': '1mm미만'})
         self.assertIn('getUltraSrtFcst', request.call_args.args[0])
         self.assertEqual(request.call_args.kwargs['params']['base_time'], '2330')
+
+    def test_rounding_for_both_sources_and_date_boundary(self):
+        for now, source in [(dt(10), 'VilageFcst'), (dt(16), 'UltraSrtFcst')]:
+            for minute, hour in [(5, 17), (29, 17), (30, 18), (45, 18), (59, 18)]:
+                with self.subTest(source=source, minute=minute):
+                    result, calls = self.fetch(now, dt(17, minute), [rows(hour)])
+                    self.assertTrue(result['available'])
+                    self.assertEqual(calls[0].args[0], source)
+                    self.assertEqual(calls[0].args[1], w.forecast_base(now, source))
+                    self.assertEqual(result['target_time'], dt(17, minute).isoformat())
+        for now in (dt(10), dt(22)):
+            result, _ = self.fetch(now, dt(23, 45), [
+                {dt(0, day=17): {'TMP': '12', 'T1H': '12', 'SKY': '1'}}])
+            self.assertEqual(result['temperature'], '12°C')
+
+    def test_rounded_target_missing_falls_back_not_previous_hour(self):
+        result, calls = self.fetch(dt(16), dt(17, 45), [rows(17), rows(18, TMP='14', SKY='1')])
+        self.assertEqual(result['temperature'], '14°C')
+        self.assertEqual([c.args[0] for c in calls], ['UltraSrtFcst', 'VilageFcst'])
+
+    def test_rounded_rain_window_never_exceeds_boarding_plus_two_hours(self):
+        result, _ = self.fetch(dt(16), dt(17, 45), [rows(18) | rows(20, PTY='1')])
+        self.assertEqual(result['precipitation_note'], '')
+        result, _ = self.fetch(dt(16), dt(17, 45), [rows(18) | rows(19, PTY='1')])
+        self.assertIn('우산', result['precipitation_note'])
+
+    def test_concise_comment_and_single_rain_advice(self):
+        combine = app_functions('parse_temp', 'get_integrated_ai_message')['get_integrated_ai_message']
+        board = dict(available=True, temperature='26°C', sky_status='흐림',
+                     message='탑승 시간대에는 가벼운 옷차림을 준비하세요.', precipitation_note='')
+        arrival = dict(board, sky_status='구름많음')
+        message = combine(board, arrival, '긴 탑승지 이름', '긴 하차지 이름')
+        self.assertNotIn('차이가 거의 없', message)
+        self.assertNotIn('기상 환경에 차이', message)
+        self.assertNotIn('26', message)
+        self.assertNotIn('긴 ', message)
+        self.assertEqual(message.count('옷차림'), 1)
+        note = '탑승 시간대 강수 가능성이 있으니 우산을 챙기세요.'
+        message = combine(dict(board, precipitation_note=note), dict(arrival, precipitation_note=note), 'A', 'B')
+        self.assertEqual(message.count('우산'), 1)
+        self.assertLessEqual(message.count('.'), 2)
+        message = combine(board, dict(arrival, temperature='20°C'), 'A', 'B')
+        self.assertNotIn('6°C', message)
+
+    def test_ai_repeated_weather_uses_concise_fallback(self):
+        ai = Mock()
+        ai.models.generate_content.return_value = Mock(text='정류장A는 26도로 흐립니다. 가벼운 옷을 입으세요.')
+        with patch.object(w, 'client', ai), patch.object(w, 'GEMINI_API_KEY', 'test'):
+            result, _ = self.fetch(dt(16), dt(17, 45), [rows(18)])
+        self.assertNotIn('26', result['message'])
+        self.assertNotIn('흐', result['message'])
 
 
 if __name__ == '__main__':
