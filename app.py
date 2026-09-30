@@ -14,6 +14,8 @@ from datetime import datetime, timedelta
 import weather_api
 import ppt_parser
 from mobile_ui import inject_mobile_styles
+from web_push import load_web_push_config
+from web_push_ui import render_web_push_poc
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -36,6 +38,7 @@ def get_env_variable(var_name, default=""):
 KAKAO_CLIENT_ID = get_env_variable("KAKAO_CLIENT_ID", "")
 KAKAO_CLIENT_SECRET = get_env_variable("KAKAO_CLIENT_SECRET", "")
 KAKAO_REDIRECT_URI = get_env_variable("KAKAO_REDIRECT_URI", "http://localhost:8501")
+WEB_PUSH_CONFIG = load_web_push_config(get_env_variable)
 
 USER_SETTINGS_FILE = "user_settings.json"
 
@@ -694,7 +697,6 @@ with main_tab_target:
                     st.button("💬 카카오톡 (로그인필요)", width='stretch', disabled=True)
 
         st.divider()
-        st.subheader("⭐ 내 통합 즐겨찾기 및 알림 설정 목록")
         if st.session_state["user_info"]:
             with st.expander("⚙️ 자동 알림 공통 조건 설정 (발송 요일 및 공휴일)", expanded=True):
                 notif_config = user_data_obj.get("notification_config", {"active_days": ["월", "화", "수", "목", "금"], "exclude_holidays": True})
@@ -726,6 +728,11 @@ with main_tab_target:
                     st.rerun()
 
             st.markdown("")
+        render_web_push_poc(WEB_PUSH_CONFIG)
+
+        st.markdown("")
+        st.subheader("⭐ 내 통합 즐겨찾기 및 알림 설정 목록")
+        if st.session_state["user_info"]:
             if user_settings:
                 for idx, item in enumerate(user_settings):
                     with st.container(border=True, key=f"mobile_favorite_{idx}"):
