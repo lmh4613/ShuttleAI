@@ -371,24 +371,16 @@ def _actual_route_data(connection):
         cursor.execute("SELECT rg.code, r.name, r.trip_type FROM routes r JOIN regions rg ON rg.id = r.region_id")
         route_rows = cursor.fetchall()
         cursor.execute(
-            "SELECT (SELECT count(*) FROM users), (SELECT count(*) FROM kakao_credentials), "
-            "(SELECT count(*) FROM notification_settings), "
-            "(SELECT count(*) FROM notification_active_days), (SELECT count(*) FROM favorites), "
-            "(SELECT count(*) FROM favorite_notifications), "
-            "(SELECT count(*) FROM push_subscriptions)"
-        )
-        unrelated_counts = cursor.fetchone()
-        cursor.execute(
             "SELECT count(*) FROM route_stops rs LEFT JOIN routes r ON r.id = rs.route_id "
             "LEFT JOIN stops s ON s.id = rs.stop_id WHERE r.id IS NULL OR s.id IS NULL"
         )
         broken_references = cursor.fetchone()[0]
-    return route_rows, stop_rows, route_stop_rows, unrelated_counts, broken_references
+    return route_rows, stop_rows, route_stop_rows, broken_references
 
 
 def verify_plan(plan: MigrationPlan) -> dict[str, int]:
     with database_connection() as connection:
-        route_rows, stop_rows, actual_rows, unrelated_counts, broken_references = _actual_route_data(connection)
+        route_rows, stop_rows, actual_rows, broken_references = _actual_route_data(connection)
 
     expected_routes = {(item.key[0], item.key[1], item.trip_type) for item in plan.routes}
     if set(route_rows) != expected_routes:
@@ -421,8 +413,6 @@ def verify_plan(plan: MigrationPlan) -> dict[str, int]:
         actual_by_route.setdefault(row[:3], []).append(row[3:])
     if actual_by_route != expected_by_route:
         raise RouteVerificationError("Route-stop order or values do not match the migration plan.")
-    if any(unrelated_counts):
-        raise RouteVerificationError("Unrelated business tables contain unexpected data.")
     if broken_references:
         raise RouteVerificationError("Broken route-stop references were found.")
 

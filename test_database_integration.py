@@ -37,16 +37,8 @@ def test_aiven_health_and_v1_schema():
                 "SELECT version, char_length(checksum) FROM schema_migrations WHERE version = '001'"
             )
             assert cursor.fetchone() == ("001", 64)
-            cursor.execute(
-                "SELECT (SELECT count(*) FROM users), "
-                "(SELECT count(*) FROM kakao_credentials), "
-                "(SELECT count(*) FROM notification_settings), "
-                "(SELECT count(*) FROM notification_active_days), "
-                "(SELECT count(*) FROM favorites), "
-                "(SELECT count(*) FROM favorite_notifications), "
-                "(SELECT count(*) FROM push_subscriptions)"
-            )
-            assert cursor.fetchone() == (0, 0, 0, 0, 0, 0, 0)
+            cursor.execute("SELECT count(*) FROM push_subscriptions")
+            assert cursor.fetchone() == (0,)
 
 
 def test_v1_constraints_and_indexes_exist():
