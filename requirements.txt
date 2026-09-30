@@ -3,6 +3,7 @@ pandas
 requests
 python-dotenv
 pywebpush==2.5.0
+psycopg[binary]==3.3.6
 google-genai
 google-generativeai
 python-pptx
