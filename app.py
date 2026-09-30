@@ -13,12 +13,14 @@ from demo_support import (prepare_login, consume_login, api_request,
 from datetime import datetime, timedelta
 import weather_api
 import ppt_parser
+from mobile_ui import inject_mobile_styles
 from dotenv import load_dotenv
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 
 st.set_page_config(page_title="AI 셔틀버스 날씨 알림", page_icon="🚌", layout="wide")
+inject_mobile_styles()
 
 def get_env_variable(var_name, default=""):
     """환경 변수를 os.getenv에서 먼저 찾고, 없으면 st.secrets에서 가져옵니다."""
@@ -587,78 +589,18 @@ with main_tab_target:
                                  boarding_target.isoformat() if boarding_target else None)
         
         st.markdown("")
-        b1, b2, b3 = st.columns(3)
-        with b1:
-            if st.button("🔍 탑승·하차 통합 날씨 조회", type="primary", width='stretch'):
-                with st.spinner("탑승지와 하차지의 기상청 날씨 및 AI 통합 코멘트 생성 중..."):
-                    w_board = weather_api.get_weather_forecast_by_coords(board_lat, board_lon, stop_name=sel_board_stop, trip_type=trip_type, target_datetime=boarding_target, location="boarding")
-                    w_arrive = weather_api.get_weather_forecast_by_coords(arrive_lat, arrive_lon, stop_name=sel_arrive_stop, trip_type=trip_type, target_datetime=boarding_target, location="destination")
-                st.session_state['w_board'] = w_board
-                st.session_state['w_arrive'] = w_arrive
-                st.session_state['integrated_stop_key'] = weather_selection_key
+        if st.button("🔍 탑승·하차 통합 날씨 조회", type="primary", width='stretch'):
+            with st.spinner("탑승지와 하차지의 기상청 날씨 및 AI 통합 코멘트 생성 중..."):
+                w_board = weather_api.get_weather_forecast_by_coords(board_lat, board_lon, stop_name=sel_board_stop, trip_type=trip_type, target_datetime=boarding_target, location="boarding")
+                w_arrive = weather_api.get_weather_forecast_by_coords(arrive_lat, arrive_lon, stop_name=sel_arrive_stop, trip_type=trip_type, target_datetime=boarding_target, location="destination")
+            st.session_state['w_board'] = w_board
+            st.session_state['w_arrive'] = w_arrive
+            st.session_state['integrated_stop_key'] = weather_selection_key
         
         user_id = st.session_state["user_info"]["id"] if st.session_state["user_info"] else "guest"
         user_data_obj = get_user_data(user_id)
         user_settings = user_data_obj.get("settings", [])
         
-        with b2:
-            if st.session_state["user_info"]:
-                if st.button("⭐ 통합 즐겨찾기 추가", width='stretch'):
-                    new_item = {
-                        "region": sel_region,
-                        "route_name": sel_route,
-                        "board_stop": sel_board_stop,
-                        "arrive_stop": sel_arrive_stop,
-                        "trip_type": trip_type,
-                        "board_time": board_row.get('arrival_time', ''),
-                        "arrive_time": "-" if is_leave else arrive_row.get('arrival_time', '-'),
-                        "board_lat": board_lat,
-                        "board_lon": board_lon,
-                        "arrive_lat": arrive_lat,
-                        "arrive_lon": arrive_lon,
-                        "notify_enabled": False,
-                        "notify_min": 10
-                    }
-                    keys = [f"{i.get('route_name')}_{i.get('board_stop')}_{i.get('arrive_stop')}" for i in user_settings]
-                    if f"{sel_route}_{sel_board_stop}_{sel_arrive_stop}" not in keys:
-                        user_settings.append(new_item)
-                        save_user_data(user_id, settings_list=user_settings)
-                        st.success("통합 즐겨찾기에 추가되었습니다!")
-                        st.rerun()
-                    else:
-                        st.warning("이미 등록된 구간입니다.")
-            else:
-                st.button("⭐ 즐겨찾기 (로그인필요)", width='stretch', disabled=True)
-
-        with b3:
-            if st.session_state["user_info"]:
-                if st.button("💬 카카오톡 통합 날씨 전송", width='stretch'):
-                    wb = st.session_state.get('w_board')
-                    wa = st.session_state.get('w_arrive')
-                    if not wb or st.session_state.get('integrated_stop_key') != weather_selection_key:
-                        wb = weather_api.get_weather_forecast_by_coords(board_lat, board_lon, stop_name=sel_board_stop, trip_type=trip_type, target_datetime=boarding_target, location="boarding")
-                        wa = weather_api.get_weather_forecast_by_coords(arrive_lat, arrive_lon, stop_name=sel_arrive_stop, trip_type=trip_type, target_datetime=boarding_target, location="destination")
-                    
-                    integrated_ai_text = get_integrated_ai_message(wb, wa, sel_board_stop, sel_arrive_stop, trip_type)
-                    arrive_time_str = "" if is_leave else (f" ({arrive_row.get('arrival_time', '-')})" if arrive_row.get('arrival_time') else "")
-                    
-                    desc = (
-                        f"🚍 노선: {sel_route} ({trip_type})\n\n"
-                        f"🟢 [탑승] {sel_board_stop} ({board_row.get('arrival_time', '-')})\n"
-                        f"• 기온: {wb['temperature']} | 상태: {wb['sky_status']}\n\n"
-                        f"🔴 [하차] {sel_arrive_stop}{arrive_time_str}\n"
-                        f"• 기온: {wa['temperature']} | 상태: {wa['sky_status']}\n\n"
-                        f"🤖 **[AI 코멘트]**\n{integrated_ai_text}"
-                    )
-                    code, res = send_user_memo(user_id, f"[{sel_route}] 탑승·하차 날씨 안내", desc)
-                    if message_succeeded(code, res):
-                        st.success("카카오톡 통합 전송 완료!")
-                        st.toast("카카오톡 나에게 톡메시지가 전송되었습니다.", icon="💬")
-                    else: 
-                        st.error("카카오톡 전송에 실패했습니다. 잠시 후 다시 시도해 주세요. 계속 실패하면 로그아웃 후 카카오 로그인으로 다시 연결해 주세요.")
-            else:
-                st.button("💬 카카오톡 (로그인필요)", width='stretch', disabled=True)
-
         if 'w_board' in st.session_state and 'w_arrive' in st.session_state and st.session_state.get('integrated_stop_key') == weather_selection_key:
             wb = st.session_state['w_board']
             wa = st.session_state['w_arrive']
@@ -670,24 +612,86 @@ with main_tab_target:
             
             res_col1, res_col2 = st.columns(2)
             with res_col1:
-                st.markdown(f"#### 🟢 탑승지: {sel_board_stop}")
-                st.caption(f"탑승 예정 시간: {boarding_target:%Y-%m-%d %H:%M}" if boarding_target else "등록된 탑승시간 없음")
-                m1, m2 = st.columns(2)
-                m1.metric("기온", wb["temperature"])
-                m2.metric("하늘상태", wb["sky_status"])
+                with st.container(border=True):
+                    st.markdown(f"#### 🟢 탑승지: {sel_board_stop}")
+                    st.caption(f"탑승 예정 시간: {boarding_target:%Y-%m-%d %H:%M}" if boarding_target else "등록된 탑승시간 없음")
+                    m1, m2 = st.columns(2)
+                    m1.metric("기온", wb["temperature"])
+                    m2.metric("하늘상태", wb["sky_status"])
             
             with res_col2:
-                st.markdown(f"#### 🔴 하차지: {sel_arrive_stop}")
-                if not is_leave:
-                    st.caption("최종 목적지" if sel_arrive_stop == "판교 제2테크노밸리" else "선택한 하차지")
-                m3, m4 = st.columns(2)
-                m3.metric("기온", wa["temperature"])
-                m4.metric("하늘상태", wa["sky_status"])
+                with st.container(border=True):
+                    st.markdown(f"#### 🔴 하차지: {sel_arrive_stop}")
+                    if not is_leave:
+                        st.caption("최종 목적지" if sel_arrive_stop == "판교 제2테크노밸리" else "선택한 하차지")
+                    m3, m4 = st.columns(2)
+                    m3.metric("기온", wa["temperature"])
+                    m4.metric("하늘상태", wa["sky_status"])
             
             st.markdown("")
             integrated_comment = get_integrated_ai_message(wb, wa, sel_board_stop, sel_arrive_stop, trip_type)
             boarding_label = f" · {boarding_target:%m/%d %H:%M} 탑승 예정" if boarding_target else ""
             st.info(f"🤖 **통합 AI 코멘트{boarding_label}**\n\n{integrated_comment}")
+
+        with st.container(key="mobile_favorite_actions"):
+            action_favorite, action_message = st.columns(2)
+            with action_favorite:
+                if st.session_state["user_info"]:
+                    if st.button("⭐ 통합 즐겨찾기 추가", width='stretch'):
+                        new_item = {
+                            "region": sel_region,
+                            "route_name": sel_route,
+                            "board_stop": sel_board_stop,
+                            "arrive_stop": sel_arrive_stop,
+                            "trip_type": trip_type,
+                            "board_time": board_row.get('arrival_time', ''),
+                            "arrive_time": "-" if is_leave else arrive_row.get('arrival_time', '-'),
+                            "board_lat": board_lat,
+                            "board_lon": board_lon,
+                            "arrive_lat": arrive_lat,
+                            "arrive_lon": arrive_lon,
+                            "notify_enabled": False,
+                            "notify_min": 10
+                        }
+                        keys = [f"{i.get('route_name')}_{i.get('board_stop')}_{i.get('arrive_stop')}" for i in user_settings]
+                        if f"{sel_route}_{sel_board_stop}_{sel_arrive_stop}" not in keys:
+                            user_settings.append(new_item)
+                            save_user_data(user_id, settings_list=user_settings)
+                            st.success("통합 즐겨찾기에 추가되었습니다!")
+                            st.rerun()
+                        else:
+                            st.warning("이미 등록된 구간입니다.")
+                else:
+                    st.button("⭐ 즐겨찾기 (로그인필요)", width='stretch', disabled=True)
+
+            with action_message:
+                if st.session_state["user_info"]:
+                    if st.button("💬 카카오톡 통합 날씨 전송", width='stretch'):
+                        wb = st.session_state.get('w_board')
+                        wa = st.session_state.get('w_arrive')
+                        if not wb or st.session_state.get('integrated_stop_key') != weather_selection_key:
+                            wb = weather_api.get_weather_forecast_by_coords(board_lat, board_lon, stop_name=sel_board_stop, trip_type=trip_type, target_datetime=boarding_target, location="boarding")
+                            wa = weather_api.get_weather_forecast_by_coords(arrive_lat, arrive_lon, stop_name=sel_arrive_stop, trip_type=trip_type, target_datetime=boarding_target, location="destination")
+
+                        integrated_ai_text = get_integrated_ai_message(wb, wa, sel_board_stop, sel_arrive_stop, trip_type)
+                        arrive_time_str = "" if is_leave else (f" ({arrive_row.get('arrival_time', '-')})" if arrive_row.get('arrival_time') else "")
+
+                        desc = (
+                            f"🚍 노선: {sel_route} ({trip_type})\n\n"
+                            f"🟢 [탑승] {sel_board_stop} ({board_row.get('arrival_time', '-')})\n"
+                            f"• 기온: {wb['temperature']} | 상태: {wb['sky_status']}\n\n"
+                            f"🔴 [하차] {sel_arrive_stop}{arrive_time_str}\n"
+                            f"• 기온: {wa['temperature']} | 상태: {wa['sky_status']}\n\n"
+                            f"🤖 **[AI 코멘트]**\n{integrated_ai_text}"
+                        )
+                        code, res = send_user_memo(user_id, f"[{sel_route}] 탑승·하차 날씨 안내", desc)
+                        if message_succeeded(code, res):
+                            st.success("카카오톡 통합 전송 완료!")
+                            st.toast("카카오톡 나에게 톡메시지가 전송되었습니다.", icon="💬")
+                        else:
+                            st.error("카카오톡 전송에 실패했습니다. 잠시 후 다시 시도해 주세요. 계속 실패하면 로그아웃 후 카카오 로그인으로 다시 연결해 주세요.")
+                else:
+                    st.button("💬 카카오톡 (로그인필요)", width='stretch', disabled=True)
 
         st.divider()
         st.subheader("⭐ 내 통합 즐겨찾기 및 알림 설정 목록")
@@ -702,11 +706,12 @@ with main_tab_target:
                     st.markdown("**알림 발송 요일 선택**")
                     all_days = ["월", "화", "수", "목", "금", "토", "일"]
                     selected_days = []
-                    day_cols = st.columns(7)
-                    for idx, day in enumerate(all_days):
-                        with day_cols[idx]:
-                            if st.checkbox(day, value=(day in current_active_days), key=f"day_chk_{day}"):
-                                selected_days.append(day)
+                    with st.container(key="mobile_weekdays"):
+                        day_cols = st.columns(7)
+                        for idx, day in enumerate(all_days):
+                            with day_cols[idx]:
+                                if st.checkbox(day, value=(day in current_active_days), key=f"day_chk_{day}"):
+                                    selected_days.append(day)
                 with col_cfg2:
                     st.markdown("**휴일 설정**")
                     exclude_hols = st.checkbox("대한민국 공휴일 자동 제외", value=current_exclude_holidays, key="exclude_hols_chk")
@@ -723,7 +728,7 @@ with main_tab_target:
             st.markdown("")
             if user_settings:
                 for idx, item in enumerate(user_settings):
-                    with st.container(border=True):
+                    with st.container(border=True, key=f"mobile_favorite_{idx}"):
                         cols_fav = st.columns([4, 2, 1])
                         with cols_fav[0]:
                             is_item_leave = "퇴근" in str(item.get('trip_type', ''))
