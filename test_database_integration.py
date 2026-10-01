@@ -15,6 +15,8 @@ EXPECTED_TABLES = {
     "schema_migrations", "regions", "routes", "stops", "route_stops", "users",
     "kakao_credentials", "notification_settings", "notification_active_days",
     "favorites", "favorite_notifications", "push_subscriptions",
+    "service_settings",
+    "notification_runs", "notification_deliveries",
 }
 
 
@@ -38,7 +40,30 @@ def test_aiven_health_and_v1_schema():
             )
             assert cursor.fetchone() == ("001", 64)
             cursor.execute("SELECT count(*) FROM push_subscriptions")
+            assert cursor.fetchone()[0] >= 0
+            cursor.execute(
+                "SELECT version, char_length(checksum) FROM schema_migrations WHERE version = '002'"
+            )
+            assert cursor.fetchone() == ("002", 64)
+            cursor.execute(
+                "SELECT version, char_length(checksum) FROM schema_migrations WHERE version = '003'"
+            )
+            assert cursor.fetchone() == ("003", 64)
+            cursor.execute("SELECT notification_channel_policy FROM service_settings")
+            assert cursor.fetchone() == ("AUTO",)
+            cursor.execute(
+                "SELECT count(*) FROM notification_settings WHERE delivery_channel IS NULL "
+                "OR delivery_channel NOT IN ('PUSH', 'KAKAO')"
+            )
             assert cursor.fetchone() == (0,)
+            cursor.execute(
+                "SELECT column_default, is_nullable FROM information_schema.columns "
+                "WHERE table_schema='public' AND table_name='notification_settings' "
+                "AND column_name='delivery_channel'"
+            )
+            default, nullable = cursor.fetchone()
+            assert "KAKAO" in default
+            assert nullable == "NO"
 
 
 def test_v1_constraints_and_indexes_exist():

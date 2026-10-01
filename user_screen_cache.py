@@ -1,0 +1,48 @@
+"""Session-scoped reuse for the Aiven-backed ordinary-user screen."""
+
+from __future__ import annotations
+
+from collections.abc import Callable, MutableMapping
+import time
+
+
+CACHE_KEY = "_user_screen_dashboard_cache"
+CACHE_TTL_SECONDS = 300
+
+
+def get_user_screen_data(
+    session: MutableMapping,
+    kakao_user_id: int,
+    *,
+    loader: Callable | None = None,
+    clock: Callable[[], float] = time.monotonic,
+) -> dict:
+    cached = session.get(CACHE_KEY)
+    now = clock()
+    if (isinstance(cached, dict)
+            and cached.get("kakao_user_id") == kakao_user_id
+            and now - cached.get("_cache_loaded_at", float("-inf")) < CACHE_TTL_SECONDS):
+        return cached
+    if loader is None:
+        from user_settings_repository import get_user_dashboard_data
+        loader = get_user_dashboard_data
+    loaded = dict(loader(kakao_user_id))
+    if (loaded.get("kakao_user_id") != kakao_user_id
+            or loaded.get("internal_user_id") is None):
+        raise ValueError("User screen cache identity mismatch")
+    loaded["_cache_loaded_at"] = now
+    session[CACHE_KEY] = loaded
+    return loaded
+
+
+def invalidate_user_screen_data(
+    session: MutableMapping,
+    kakao_user_id: int | None = None,
+) -> bool:
+    cached = session.get(CACHE_KEY)
+    if not isinstance(cached, dict):
+        return False
+    if kakao_user_id is not None and cached.get("kakao_user_id") != kakao_user_id:
+        return False
+    del session[CACHE_KEY]
+    return True

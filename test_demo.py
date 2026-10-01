@@ -119,8 +119,75 @@ class AppFlowTests(unittest.TestCase):
         self.comment_client.start()
         from weather_comment_ai import clear_cache
         clear_cache()
+        self.favorite_records = []
+        self.notification_record = {
+            "user_id": 11, "role": "user", "exclude_holidays": True,
+            "timezone": "Asia/Seoul", "delivery_channel": "KAKAO",
+            "active_days": [0, 1, 2, 3, 4], "active_push_devices": 0,
+        }
+        self.next_favorite_id = 1
+
+        def create_favorite(_user_id, item):
+            identity = (item["route_name"], item["board_stop"], item["arrive_stop"])
+            if any((entry["route_name"], entry["board_stop"], entry["arrive_stop"]) == identity
+                   for entry in self.favorite_records):
+                from user_settings_repository import DuplicateFavoriteError
+                raise DuplicateFavoriteError("이미 등록된 구간입니다.")
+            favorite = dict(item, favorite_id=self.next_favorite_id,
+                            notify_enabled=False, notify_min=10)
+            self.next_favorite_id += 1
+            self.favorite_records.append(favorite)
+            return favorite["favorite_id"]
+
+        def delete_favorite(_user_id, favorite_id):
+            before = len(self.favorite_records)
+            self.favorite_records[:] = [
+                item for item in self.favorite_records if item["favorite_id"] != favorite_id
+            ]
+            return len(self.favorite_records) != before
+
+        def update_favorite(_user_id, favorite_id, *, enabled, lead_minutes):
+            for item in self.favorite_records:
+                if item["favorite_id"] == favorite_id:
+                    item.update(notify_enabled=enabled, notify_min=lead_minutes)
+                    return True
+            return False
+
+        def update_notification(_user_id, *, active_days, exclude_holidays,
+                                delivery_channel):
+            self.notification_record.update(
+                active_days=list(active_days), exclude_holidays=exclude_holidays,
+                delivery_channel=delivery_channel,
+            )
+
+        repository_patches = {
+            "get_notification_settings": lambda _user_id: dict(self.notification_record),
+            "list_favorites": lambda _user_id: [dict(item) for item in self.favorite_records],
+            "get_user_dashboard_data": lambda user_id: {
+                "kakao_user_id": user_id,
+                "internal_user_id": self.notification_record["user_id"],
+                "notification_settings": dict(self.notification_record),
+                "favorites": [dict(item) for item in self.favorite_records],
+            },
+            "create_favorite": create_favorite,
+            "delete_favorite": delete_favorite,
+            "update_favorite_notification": update_favorite,
+            "update_notification_settings": update_notification,
+            "get_global_notification_policy": lambda: "AUTO",
+            "update_global_notification_policy": Mock(),
+        }
+        self.repository_patchers = [
+            patch(f"user_settings_repository.{name}", side_effect=value)
+            for name, value in repository_patches.items()
+        ]
+        self.repository_mocks = {
+            name: patcher.start()
+            for name, patcher in zip(repository_patches, self.repository_patchers)
+        }
 
     def tearDown(self):
+        for patcher in reversed(self.repository_patchers):
+            patcher.stop()
         self.comment_client.stop()
         self.api.stop()
         self.temp.cleanup()
@@ -137,6 +204,10 @@ class AppFlowTests(unittest.TestCase):
 
     def test_new_user_role_selection_and_favorite(self):
         app = self.login(12345)
+        dashboard_loader = self.repository_mocks["get_user_dashboard_data"]
+        self.assertEqual(dashboard_loader.call_count, 1)
+        app.run()
+        self.assertEqual(dashboard_loader.call_count, 1)
         self.assertTrue(app.selectbox(key="user_board_st").disabled)
         self.assertEqual(len(app.selectbox(key="user_board_st").options), 1)
         self.assertFalse(app.session_state["is_admin"])
@@ -145,11 +216,15 @@ class AppFlowTests(unittest.TestCase):
         self.assertEqual(len(app.tabs), 1)
         next(b for b in app.button if b.label == "⭐ 통합 즐겨찾기 추가").click().run()
         self.assertEqual(len(app.exception), 0)
+        self.assertEqual(len(self.favorite_records), 1)
+        self.assertFalse(self.favorite_records[0]["notify_enabled"])
+        self.assertEqual(dashboard_loader.call_count, 2)
         data = json.loads(Path(self.data_file).read_text(encoding="utf-8"))["12345"]
-        self.assertEqual(len(data["settings"]), 1)
-        self.assertFalse(data["settings"][0]["notify_enabled"])
+        self.assertNotIn("settings", data)
+        self.assertNotIn("notification_config", data)
         next(b for b in app.button if b.label == "⭐ 통합 즐겨찾기 추가").click().run()
         self.assertTrue(any("이미 등록" in w.value for w in app.warning))
+        self.assertEqual(dashboard_loader.call_count, 2)
 
     def test_admin_preview_and_return(self):
         app = self.login(5070327065)
@@ -158,8 +233,13 @@ class AppFlowTests(unittest.TestCase):
         self.assertTrue(app.session_state["is_admin"])
         self.assertTrue(app.session_state["preview_user"])
         self.assertEqual(len(app.tabs), 1)
-        next(b for b in app.button if b.label == "⭐ 통합 즐겨찾기 추가").click().run()
+        favorite_button = next(b for b in app.button if b.label == "⭐ 통합 즐겨찾기 추가")
+        self.assertTrue(favorite_button.disabled)
         self.assertEqual(len(app.exception), 0)
+        self.repository_mocks["create_favorite"].assert_not_called()
+        for label in ("💾 공통 알림 조건 저장", "💾 설정 저장", "🗑️ 삭제"):
+            for button in [item for item in app.button if item.label == label]:
+                self.assertTrue(button.disabled)
 
         next(b for b in app.button if b.label == "관리자 모드로 돌아가기").click().run()
         self.assertTrue(app.session_state["is_admin"])
@@ -170,6 +250,7 @@ class AppFlowTests(unittest.TestCase):
     def test_weather_preview_admin_only_and_user_mode_cleanup(self):
         admin = self.login(5070327065)
         self.assertTrue(any(e.label == '🧪 날씨 코멘트 테스트' for e in admin.expander))
+        self.assertTrue(any(e.label == '🔔 알림 발송 이력' for e in admin.expander))
         real_selection = {key: admin.selectbox(key=key).value for key in support.SELECTION_KEYS}
         with patch('weather_advice_preview.generate_preview', wraps=__import__('weather_advice_preview').generate_preview) as generate:
             admin.selectbox(key='weather_preview_scenario').select('명확한 눈 예보 + 추운 날씨').run()
@@ -187,10 +268,12 @@ class AppFlowTests(unittest.TestCase):
             next(b for b in admin.button if b.label == '일반 사용자 모드로 보기').click().run()
             generate.assert_not_called()
             self.assertFalse(any(e.label == '🧪 날씨 코멘트 테스트' for e in admin.expander))
+            self.assertFalse(any(e.label == '🔔 알림 발송 이력' for e in admin.expander))
             self.assertFalse(any(key.startswith('weather_preview_') for key in admin.session_state.filtered_state))
             user = self.login(12345)
             generate.assert_not_called()
             self.assertFalse(any(e.label == '🧪 날씨 코멘트 테스트' for e in user.expander))
+            self.assertFalse(any(e.label == '🔔 알림 발송 이력' for e in user.expander))
             self.assertFalse(any('Gemini 문구 생성' in b.label or 'Gemini 코멘트 생성' in b.label for b in user.button))
 
     def test_morning_dropoff_selection_coordinates_and_favorite(self):
@@ -218,9 +301,62 @@ class AppFlowTests(unittest.TestCase):
                              fetch.call_args_list[1].kwargs['target_datetime'])
             next(b for b in app.button if b.label == '⭐ 통합 즐겨찾기 추가').click().run()
             self.assertEqual(len(app.exception), 0)
-            favorite = json.loads(Path(self.data_file).read_text(encoding='utf-8'))['12345']['settings'][0]
+            favorite = self.favorite_records[0]
             self.assertEqual(favorite['arrive_stop'], 'D (하차만)')
             self.assertEqual(favorite['arrive_lat'], 37.3)
+
+    def test_notification_channel_and_favorite_settings_use_repository(self):
+        app = self.login(12345)
+        dashboard_loader = self.repository_mocks["get_user_dashboard_data"]
+        self.assertEqual(dashboard_loader.call_count, 1)
+        self.assertEqual(app.radio(key="user_delivery_channel_11").value, "KAKAO")
+        app.radio(key="user_delivery_channel_11").set_value("PUSH")
+        next(b for b in app.button if b.label == "💾 공통 알림 조건 저장").click().run()
+        self.assertEqual(dashboard_loader.call_count, 2)
+        self.assertEqual(self.notification_record["delivery_channel"], "PUSH")
+        self.assertTrue(any("기기를 먼저 등록" in item.value for item in app.info))
+        self.assertFalse(any("settings" in value for value in json.loads(
+            Path(self.data_file).read_text(encoding="utf-8")
+        ).get("12345", {})))
+
+    def test_favorite_update_and_delete_invalidate_dashboard_cache(self):
+        self.favorite_records.append({
+            "favorite_id": 1, "region": "seoul", "route_name": "(퇴근) 노원",
+            "trip_type": "퇴근길", "board_stop": "출발", "board_time": "17:30",
+            "arrive_stop": "도착", "arrive_time": "-", "notify_enabled": False,
+            "notify_min": 10,
+        })
+        self.next_favorite_id = 2
+        app = self.login(12345)
+        dashboard_loader = self.repository_mocks["get_user_dashboard_data"]
+        self.assertEqual(dashboard_loader.call_count, 1)
+        app.button(key="save_notif_1").click().run()
+        self.assertEqual(dashboard_loader.call_count, 2)
+        app.button(key="del_fav_1").click().run()
+        self.assertEqual(dashboard_loader.call_count, 3)
+        self.assertEqual(self.favorite_records, [])
+
+    def test_admin_global_policy_ui_calls_authorized_repository_service(self):
+        app = self.login(5070327065)
+        selector = app.selectbox(key="admin_global_notification_policy")
+        self.assertEqual(selector.value, "AUTO")
+        selector.select("PUSH")
+        app.button(key="save_global_notification_policy").click().run()
+        self.repository_mocks["update_global_notification_policy"].assert_called_with(
+            5070327065, "PUSH"
+        )
+
+    def test_settings_database_failure_is_safe_and_has_no_json_fallback(self):
+        from user_settings_repository import UserSettingsError
+        self.repository_mocks["get_user_dashboard_data"].side_effect = UserSettingsError(
+            "설정 정보를 불러오지 못했습니다. 잠시 후 다시 시도해 주세요."
+        )
+        app = self.login(12345)
+        self.assertEqual(len(app.exception), 0)
+        self.assertTrue(any("잠시 후" in item.value for item in app.error))
+        favorite = next(b for b in app.button if b.label == "⭐ 통합 즐겨찾기 추가")
+        self.assertTrue(favorite.disabled)
+        self.assertFalse(any("등록된 통합 즐겨찾기가 없습니다" in item.value for item in app.info))
 
     def test_route_changes_reset_stops_even_when_names_overlap(self):
         routes = {
@@ -285,8 +421,15 @@ class AppFlowTests(unittest.TestCase):
         weather = {"available": True, "temperature": "21°C", "sky_status": "맑음",
                    "rain_probability": "정보 없음", "message": "탑승 시간대에는 가벼운 겉옷을 준비하세요.",
                    "precipitation_note": "탑승 후 1~2시간 이내 강수 가능성이 있으니 우산을 챙기세요."}
-        with patch.object(weather_api, "get_weather_forecast_by_coords", return_value=weather) as fetch:
+        with patch.object(weather_api, "get_weather_forecast_by_coords", return_value=weather) as fetch, \
+             patch("weather_comment_ai.generate_weather_advice", return_value={
+                 "text": "퇴근길에는 비가 내릴 가능성이 있으니 우산을 챙기세요.",
+                 "source": "python"
+             }) as advice:
             next(b for b in app.button if b.label == "🔍 탑승·하차 통합 날씨 조회").click().run()
+            app.run()
+            self.assertEqual(fetch.call_count, 2)
+            advice.assert_called_once()
         self.assertEqual(len(app.exception), 0)
         self.assertEqual(fetch.call_count, 2)
         first, second = [call.kwargs for call in fetch.call_args_list]

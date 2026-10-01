@@ -118,3 +118,37 @@ def test_initial_schema_contains_only_v1_tables_and_core_constraints():
     assert "WHERE is_default_dropoff" in sql
     assert "access_token TEXT" not in sql
     assert "refresh_token TEXT" not in sql
+
+
+def test_notification_channel_migration_is_additive_and_safe_for_existing_users():
+    sql = Path("migrations/002_notification_channel.sql").read_text("utf-8")
+
+    assert "ALTER TABLE notification_settings" in sql
+    assert "delivery_channel TEXT NOT NULL DEFAULT 'KAKAO'" in sql
+    assert "CHECK (delivery_channel IN ('PUSH', 'KAKAO'))" in sql
+    assert "CREATE TABLE IF NOT EXISTS service_settings" in sql
+    assert "notification_channel_policy TEXT NOT NULL DEFAULT 'AUTO'" in sql
+    assert "CHECK (notification_channel_policy IN ('AUTO', 'PUSH', 'KAKAO'))" in sql
+    assert "ON CONFLICT (singleton) DO NOTHING" in sql
+    assert "DROP TABLE" not in sql.upper()
+
+
+def test_project_migrations_keep_existing_versions_and_add_v3_in_order():
+    migrations = discover_migrations(Path("migrations"))
+    assert [(item.version, item.name) for item in migrations] == [
+        ("001", "initial_schema"),
+        ("002", "notification_channel"),
+        ("003", "notification_history"),
+    ]
+
+
+def test_notification_history_migration_has_atomic_identity_and_no_message_content():
+    sql = Path("migrations/003_notification_history.sql").read_text("utf-8")
+    assert "CREATE TABLE IF NOT EXISTS notification_runs" in sql
+    assert "CREATE TABLE IF NOT EXISTS notification_deliveries" in sql
+    assert "UNIQUE (user_id, favorite_id, service_date, scheduled_time)" in sql
+    assert "REFERENCES push_subscriptions(id) ON DELETE SET NULL" in sql
+    assert "PROCESSING" in sql and "PARTIAL" in sql and "EXPIRED" in sql
+    lowered = sql.lower()
+    for forbidden in ("message_body", "message_title", "endpoint", "p256dh", "auth", "kakao_user_id"):
+        assert forbidden not in lowered
