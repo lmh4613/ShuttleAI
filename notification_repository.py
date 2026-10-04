@@ -243,6 +243,7 @@ WITH first_stops AS (
     SELECT DISTINCT ON (rs.route_id)
            rs.route_id, rs.stop_id, rs.scheduled_time
       FROM route_stops rs
+     WHERE rs.active=TRUE
      ORDER BY rs.route_id, rs.stop_order
 )
 SELECT u.id, f.id, nad.weekday, ns.exclude_holidays, ns.timezone, ns.delivery_channel,
@@ -260,12 +261,14 @@ SELECT u.id, f.id, nad.weekday, ns.exclude_holidays, ns.timezone, ns.delivery_ch
   FROM users u
   JOIN notification_settings ns ON ns.user_id=u.id
   JOIN notification_active_days nad ON nad.user_id=u.id AND nad.weekday=ANY(%s)
-  JOIN favorites f ON f.user_id=u.id
+  JOIN favorites f ON f.user_id=u.id AND f.active=TRUE
   JOIN favorite_notifications fn ON fn.favorite_id=f.id AND fn.enabled=TRUE
   JOIN routes r ON r.id=f.route_id AND r.active=TRUE
   JOIN route_stops boarding_rs ON boarding_rs.id=f.boarding_route_stop_id
+       AND boarding_rs.active=TRUE
   JOIN stops boarding_stop ON boarding_stop.id=boarding_rs.stop_id AND boarding_stop.active=TRUE
   JOIN route_stops destination_rs ON destination_rs.id=f.alighting_route_stop_id
+       AND destination_rs.active=TRUE
   JOIN stops destination_stop ON destination_stop.id=destination_rs.stop_id AND destination_stop.active=TRUE
   LEFT JOIN first_stops first_rs ON first_rs.route_id=r.id
   LEFT JOIN stops first_stop ON first_stop.id=first_rs.stop_id AND first_stop.active=TRUE

@@ -62,7 +62,11 @@ def test_target_query_filters_and_attaches_all_active_devices():
     sql = cursor.sql[0][0]
     assert "u.enabled=TRUE" in sql
     assert "fn.enabled=TRUE" in sql
+    assert "f.active=TRUE" in sql
     assert "r.active=TRUE" in sql
+    assert "boarding_rs.active=TRUE" in sql
+    assert "destination_rs.active=TRUE" in sql
+    assert "rs.active=TRUE" in sql
     assert "nad.weekday=ANY" in sql
     assert "first_rs.scheduled_time" in sql
     push_sql = cursor.sql[1][0]

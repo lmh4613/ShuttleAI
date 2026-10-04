@@ -11,6 +11,7 @@ from demo_support import (prepare_login, consume_login, api_request,
 from datetime import datetime
 import weather_api
 import ppt_parser
+from pdf_route_canonical import PdfCanonicalError
 from mobile_ui import inject_mobile_styles
 from web_push import load_web_push_config
 from web_push_ui import render_web_push_poc
@@ -21,6 +22,18 @@ from notification_repository import (
     save_kakao_credentials,
 )
 from notification_worker import start_notification_worker
+from route_repository import (
+    RouteConflictError,
+    RouteRepositoryError,
+    RouteValidationError,
+    StaleRouteSnapshotError,
+    load_admin_route_snapshot,
+    load_routes_for_ui,
+    preview_region_reconcile,
+    reconcile_admin_route_edits,
+    reconcile_region_routes,
+    update_route_stop_coordinates,
+)
 from user_settings_repository import (
     DuplicateFavoriteError,
     UserSettingsError,
@@ -163,11 +176,158 @@ def get_integrated_ai_message(wb, wa, board_name, arrive_name, trip_type='출근
 
 def route_stop_options(stops, is_leave):
     """Preserve route order; only marked morning stops are extra destinations."""
+    if stops and isinstance(stops[0], dict):
+        if "boarding_allowed" in stops[0]:
+            rows = stops
+            if is_leave:
+                boarding = [row["stop_name"] for row in rows if row.get("boarding_allowed")]
+                arrival = [row["stop_name"] for row in rows if row.get("alighting_allowed")]
+                return boarding or ["정류장 없음"], arrival or ["정류장 없음"]
+            boarding = [row["stop_name"] for row in rows if row.get("boarding_allowed")]
+            arrival_rows = [row for row in rows if row.get("alighting_allowed")]
+            defaults = [row["stop_name"] for row in arrival_rows if row.get("is_default_dropoff")]
+            marked = [row["stop_name"] for row in arrival_rows
+                      if not row.get("is_default_dropoff") and "(하차만)" in row["stop_name"]]
+            arrival = list(dict.fromkeys(defaults + marked))
+            return boarding or ["정류장 없음"], arrival or ["판교 제2테크노밸리"]
+        stops = [row.get("stop_name") for row in stops]
     if is_leave:
         return stops[:1] or ["정류장 없음"], stops or ["정류장 없음"]
     boarding = [stop for stop in stops if "(하차만)" not in stop]
     arrival = list(dict.fromkeys(["판교 제2테크노밸리"] + [stop for stop in stops if "(하차만)" in stop]))
     return boarding or ["정류장 없음"], arrival
+
+
+def render_reconcile_preview(preview, *, region):
+    labels = [
+        ("추가 노선", "routes_added"), ("수정 노선", "routes_updated"),
+        ("비활성화 예정 노선", "routes_deactivated"),
+        ("추가 정류장", "stops_added"), ("수정 정류장", "stops_updated"),
+        ("제거 예정 정류장", "stops_removed"),
+    ]
+    columns = st.columns(3)
+    for index, (label, key) in enumerate(labels):
+        columns[index % 3].metric(label, preview.get(key, 0))
+    if preview.get("conflicts"):
+        st.error("노선 구조를 자동으로 확정할 수 없어 저장할 수 없습니다.")
+        for conflict in preview["conflicts"]:
+            st.caption(f"• {conflict}")
+
+    details = preview.get("details", [])
+    if details:
+        with st.expander(f"상세 변경 내역 ({len(details)}건)", expanded=False):
+            with st.container(height=320):
+                for detail in details:
+                    current = "-" if detail.get("current") is None else str(detail["current"])
+                    proposed = "-" if detail.get("proposed") is None else str(detail["proposed"])
+                    st.markdown(
+                        f"**{detail.get('route_name', '')}** · "
+                        f"{detail.get('stop_name') or '노선'} · `{detail.get('change_type', '')}`"
+                    )
+                    st.caption(
+                        f"{detail.get('field', '')}: {current} → {proposed}"
+                    )
+    decisions = {}
+    candidates = preview.get("change_candidates", [])
+    if candidates:
+        st.markdown("**관리자 선택이 필요한 변경 후보**")
+        for candidate in candidates:
+            with st.container(border=True):
+                st.markdown(
+                    f"**{candidate['route_name']} / {candidate['stop_order']}번**"
+                )
+                for field in candidate["fields"]:
+                    st.caption(
+                        f"{field['field']}: {field['current']} → {field['proposed']}"
+                    )
+                choice = st.selectbox(
+                    "처리 방법",
+                    ["", "APPLY", "KEEP_EXISTING"],
+                    format_func=lambda value: {
+                        "": "선택하세요", "APPLY": "변경 적용",
+                        "KEEP_EXISTING": "기존 값 유지",
+                    }[value],
+                    key=f"route_change_{region}_{candidate['candidate_id']}",
+                )
+                if choice:
+                    decisions[candidate["candidate_id"]] = choice
+    return decisions
+
+
+def render_route_import(region, label, uploader_key, existing_rows):
+    pending_key = f"route_import_pending_{region}"
+    success_key = f"route_import_success_{region}"
+    if st.session_state.pop(success_key, False):
+        st.success(f"{label} 노선이 Aiven에 저장되었습니다.")
+    uploaded = st.file_uploader(
+        f"{label} 셔틀 노선 파일 선택 (PDF, PPTX)",
+        type=["pdf", "pptx"], key=uploader_key,
+    )
+    if uploaded and st.button(f"{label} 데이터 분석 및 미리보기", type="primary",
+                              key=f"preview_route_import_{region}"):
+        stage = "document_parse"
+        try:
+            with st.spinner(f"Gemini AI가 {label} 노선 문서를 분석 중입니다..."):
+                parsed = ppt_parser.parse_shuttle_document(uploaded)
+                stage = "coordinate_prepare"
+                bar = st.progress(0)
+                txt = st.empty()
+                logger.info("Route geocoding started region=%s", region)
+                rows = weather_api.prepare_routes_with_sequential_geocoding(
+                    parsed, target_region=region,
+                    existing_rows=existing_rows,
+                    progress_callback=lambda c, t, s: (
+                        bar.progress(c / t), txt.text(f"지오코딩 중... ({c}/{t}): {s}")
+                    ),
+                )
+                stage = "reconcile_preview"
+                logger.info("Route reconcile preview started region=%s", region)
+                preview = preview_region_reconcile(region, rows)
+            st.session_state[pending_key] = {"rows": rows, "preview": preview}
+        except RouteRepositoryError as exc:
+            st.session_state.pop(pending_key, None)
+            st.error(str(exc))
+        except PdfCanonicalError as exc:
+            logger.exception(
+                "[ROUTE_IMPORT_ERROR] stage=%s region=%s type=%s message=%s",
+                stage, region, type(exc).__name__, str(exc),
+            )
+            st.session_state.pop(pending_key, None)
+            st.error("노선 문서를 분석하지 못했습니다. 파일과 API 연결 상태를 확인해 주세요.")
+        except Exception as exc:
+            logger.warning(
+                "[ROUTE_IMPORT_ERROR] stage=%s region=%s type=%s",
+                stage, region, type(exc).__name__,
+            )
+            st.session_state.pop(pending_key, None)
+            st.error("노선 문서를 분석하지 못했습니다. 파일과 API 연결 상태를 확인해 주세요.")
+
+    pending = st.session_state.get(pending_key)
+    if pending:
+        st.markdown("**Aiven 반영 예정 변경사항**")
+        decisions = render_reconcile_preview(pending["preview"], region=region)
+        candidates = pending["preview"].get("change_candidates", [])
+        unresolved = len(decisions) != len(candidates)
+        if unresolved:
+            st.info("모든 변경 후보에 대해 적용 또는 기존 값 유지를 선택해 주세요.")
+        if st.button(
+            f"{label} 데이터 Aiven에 저장", type="primary",
+            key=f"save_route_import_{region}",
+            disabled=bool(pending["preview"].get("conflicts")) or unresolved,
+        ):
+            try:
+                reconcile_region_routes(
+                    region, pending["rows"],
+                    expected_snapshot=pending["preview"]["snapshot"],
+                    change_decisions=decisions,
+                )
+                st.session_state.pop(pending_key, None)
+                st.session_state[success_key] = True
+                st.rerun()
+            except (RouteConflictError, StaleRouteSnapshotError) as exc:
+                st.error(str(exc))
+            except RouteRepositoryError as exc:
+                st.error(str(exc))
 
 def send_worker_kakao(target, title, description):
     """Deliver through Kakao only when the resolved channel is Kakao."""
@@ -259,10 +419,18 @@ if ("code" in query_params or "error" in query_params) and st.session_state["use
                 st.session_state["login_error"] = "카카오 로그인에 연결하지 못했습니다. 인터넷 연결을 확인하고 다시 로그인해 주세요."
     st.rerun()
 
+# Load the route source of truth once per Streamlit execution.
+route_load_error = None
+try:
+    db_data = load_routes_for_ui()
+except RouteRepositoryError as exc:
+    db_data = []
+    route_load_error = str(exc)
+
 # Restore only existing choices, before widgets are constructed.
 restored = st.session_state.pop("restored_selection", None)
 if restored:
-    rows = weather_api.load_routes_from_db()
+    rows = db_data
     rows = [r for r in rows if r.get("region", "gyeonggi") == restored.get("user_reg")]
     if not rows:
         restored = {}
@@ -326,11 +494,20 @@ with st.sidebar:
 
 st.title("🚌 AI 셔틀버스 날씨 알림 (탑승·하차 통합 안내)")
 
-db_data = weather_api.load_routes_from_db()
+if route_load_error:
+    st.error(route_load_error)
 sorted_db_data = sorted(
     db_data,
     key=lambda x: x.get('region', 'gyeonggi')
 )
+admin_snapshot = {"rows": [], "identity_map": {}, "snapshots": {}}
+admin_route_error = None
+if st.session_state["is_admin"] and not st.session_state["preview_user"]:
+    try:
+        admin_snapshot = load_admin_route_snapshot()
+    except RouteRepositoryError as exc:
+        admin_route_error = str(exc)
+admin_db_data = admin_snapshot["rows"]
 
 if st.session_state["is_admin"] and not st.session_state["preview_user"]:
     tab1, tab2 = st.tabs(["👑 [어드민] 노선 관리 및 그리드 편집", "🌤️ 셔틀버스 탑승·하차 통합 날씨 및 즐겨찾기"], default="🌤️ 셔틀버스 탑승·하차 통합 날씨 및 즐겨찾기")
@@ -347,6 +524,8 @@ if tab1 is None:
 if tab1 is not None:
     with tab1:
         st.header("📋 지역별 셔틀버스 노선 문서 업로드 및 관리")
+        if admin_route_error:
+            st.error(admin_route_error)
         st.subheader("🔔 전역 알림 채널 정책")
         try:
             global_channel_policy = get_global_notification_policy()
@@ -383,51 +562,21 @@ if tab1 is not None:
         up_tab_gy, up_tab_se = st.tabs(["🟢 경기 지역 업로드", "🔵 서울 지역 업로드"])
         
         with up_tab_gy:
-            file_gy = st.file_uploader("경기 셔틀 노선 파일 선택 (PDF, PPTX)", type=["pdf", "pptx"], key="up_gy")
-            if file_gy and st.button("경기 데이터 일괄 반영", type="primary"):
-                try:
-                    with st.spinner("Gemini AI가 경기 노선 문서를 분석 중입니다..."):
-                        parsed = ppt_parser.parse_shuttle_document(file_gy)
-                        bar = st.progress(0)
-                        txt = st.empty()
-                        weather_api.save_routes_with_sequential_geocoding(
-                            parsed, target_region="gyeonggi", 
-                            progress_callback=lambda c, t, s: (bar.progress(c/t), txt.text(f"지오코딩 중... ({c}/{t}): {s}"))
-                        )
-                    st.success("경기 노선 반영 완료!")
-                    st.rerun()
-                except Exception as e:
-                    logger.exception("Route import failed")
-                    st.error("노선 문서를 처리하지 못했습니다. 파일과 API 연결 상태를 확인해 주세요.")
+            render_route_import("gyeonggi", "경기", "up_gy", admin_db_data)
 
         with up_tab_se:
-            file_se = st.file_uploader("서울 셔틀 노선 파일 선택 (PDF, PPTX)", type=["pdf", "pptx"], key="up_se")
-            if file_se and st.button("서울 데이터 일괄 반영", type="primary"):
-                try:
-                    with st.spinner("Gemini AI가 서울 노선 문서를 분석 중입니다..."):
-                        parsed = ppt_parser.parse_shuttle_document(file_se)
-                        bar = st.progress(0)
-                        txt = st.empty()
-                        weather_api.save_routes_with_sequential_geocoding(
-                            parsed, target_region="seoul", 
-                            progress_callback=lambda c, t, s: (bar.progress(c/t), txt.text(f"지오코딩 중... ({c}/{t}): {s}"))
-                        )
-                    st.success("서울 노선 반영 완료!")
-                    st.rerun()
-                except Exception as e:
-                    logger.exception("Route import failed")
-                    st.error("노선 문서를 처리하지 못했습니다. 파일과 API 연결 상태를 확인해 주세요.")
+            render_route_import("seoul", "서울", "up_se", admin_db_data)
 
         st.divider()
         st.subheader("📍 특정 정류장 좌표 단건 재계산")
-        if sorted_db_data:
+        if admin_db_data:
             c1, c2, c3 = st.columns(3)
             with c1:
-                admin_regions = sorted(list(set(i.get('region', 'gyeonggi') for i in sorted_db_data)))
+                admin_regions = sorted(list(set(i.get('region', 'gyeonggi') for i in admin_db_data)))
                 reg_map_admin = {"gyeonggi": "경기", "seoul": "서울"}
                 sel_admin_region = st.selectbox("지역 선택", admin_regions, format_func=lambda x: reg_map_admin.get(x, x), key="admin_reg")
             
-            reg_filtered_admin = [i for i in sorted_db_data if i.get('region', 'gyeonggi') == sel_admin_region]
+            reg_filtered_admin = [i for i in admin_db_data if i.get('region', 'gyeonggi') == sel_admin_region]
             
             with c2:
                 admin_routes = list(dict.fromkeys(i.get('route_name') for i in reg_filtered_admin if i.get('route_name')))
@@ -438,48 +587,62 @@ if tab1 is not None:
             with c3:
                 admin_stops = [i.get('stop_name') for i in route_filtered_admin]
                 sel_st = st.selectbox("정류장 선택", admin_stops if admin_stops else ["정류장 없음"], key="admin_st")
+            selected_admin_row = next(
+                (row for row in route_filtered_admin if row.get("stop_name") == sel_st), None
+            )
             
             if st.button("🎯 선택 정류장 좌표 재계산 및 갱신", type="primary"):
                 with st.spinner("카카오 지도 API 및 Gemini 격자 변환 처리 중..."):
-                    print(f"[LOG] 단건 좌표 재계산 요청 시작 -> 노선: {sel_rt}, 정류장: {sel_st}")
                     try:
-                        succ, msg = weather_api.update_single_route_coordinate(sel_st, sel_rt)
-                        print(f"[LOG] 단건 좌표 재계산 응답 결과 -> 성공 여부: {succ}, 메시지: {msg}")
-                    except Exception as e:
-                        succ = False
-                        msg = f"예외 발생 (Exception): {str(e)}"
-                        print(f"[LOG ERROR] update_single_route_coordinate 실행 중 예외 발생: {e}")
-                
-                if succ:
-                    st.success(f"✅ 수정 완료: {msg}")
-                    st.toast("정류장 좌표가 성공적으로 재계산 및 수정되었습니다!", icon="🎯")
-                    st.rerun()
-                else:
-                    st.error(f"❌ 수정 실패: {msg}")
-                    with st.expander("🔍 Gemini 호출 및 지오코딩 실패 원인 상세 확인"):
-                        st.markdown(f"- **대상 노선:** `{sel_rt}`")
-                        st.markdown(f"- **대상 정류장:** `{sel_st}`")
-                        st.markdown(f"- **반환된 메시지/에러:** `{msg}`")
-                        st.info("💡 **확인 사항:** `weather_api.py` 내부의 Gemini API 호출 함수에서 API Key 인증 오류, 할당량 초과, 또는 모델명 설정 문제로 인해 예외가 발생하고 기본값(판교)으로 빠지고 있는지 확인이 필요합니다.")                    
+                        if selected_admin_row is None:
+                            raise RouteValidationError("수정할 정류장을 찾을 수 없습니다.")
+                        identity = admin_snapshot["identity_map"].get(
+                            selected_admin_row.get("_identity_key"), {}
+                        )
+                        if not identity:
+                            raise RouteValidationError("정류장 식별정보를 찾을 수 없습니다.")
+                        new_lat, new_lon = weather_api.get_coordinates_by_gemini(sel_st)
+                        if new_lat == 37.3947 and new_lon == 127.1111:
+                            raise RouteValidationError(
+                                "좌표를 확인하지 못해 기본 좌표가 반환되었습니다. 저장을 취소했습니다."
+                            )
+                        new_nx, new_ny = weather_api.latlon_to_grid(new_lat, new_lon)
+                        update_route_stop_coordinates(
+                            identity["route_stop_id"], latitude=new_lat, longitude=new_lon,
+                            grid_x=new_nx, grid_y=new_ny,
+                            geocode_status="✅ 정상 (단건 재조회)",
+                            expected_version=identity["version"],
+                        )
+                    except RouteRepositoryError as exc:
+                        st.error(str(exc))
+                    except Exception as exc:
+                        logger.warning("Route coordinate refresh failed type=%s", type(exc).__name__)
+                        st.error("정류장 좌표를 갱신하지 못했습니다.")
+                    else:
+                        st.toast("정류장 좌표가 성공적으로 갱신되었습니다!", icon="🎯")
+                        st.rerun()
 
         st.divider()
         st.subheader("📝 노선 및 정류장 데이터 직접 편집 그리드")
-        if sorted_db_data:
-            df_routes = pd.DataFrame(sorted_db_data)
-            edited_df = st.data_editor(df_routes, num_rows="dynamic", width='stretch', key="route_grid_editor", height=400)
+        if admin_db_data:
+            df_routes = pd.DataFrame(admin_db_data)
+            edited_df = st.data_editor(
+                df_routes, num_rows="dynamic", width='stretch',
+                key="route_grid_editor", height=400,
+                column_config={"_identity_key": None, "_stop_order": None},
+            )
             if st.button("💾 그리드 변경사항 저장", type="primary", width='stretch'):
                 try:
                     updated_records = edited_df.to_dict(orient="records")
-                    if hasattr(weather_api, 'save_all_routes'):
-                        weather_api.save_all_routes(updated_records)
-                    else:
-                        db_file = getattr(weather_api, 'DB_FILE', 'routes_db.json')
-                        with open(db_file, "w", encoding="utf-8") as f:
-                            json.dump(updated_records, f, ensure_ascii=False, indent=4)
-                    st.success("✅ 변경사항이 저장되었습니다!")
+                    reconcile_admin_route_edits(
+                        updated_records,
+                        identity_map=admin_snapshot["identity_map"],
+                        expected_snapshots=admin_snapshot["snapshots"],
+                    )
+                    st.toast("노선 변경사항이 Aiven에 저장되었습니다.", icon="✅")
                     st.rerun()
-                except Exception as e:
-                    st.error(f"❌ 저장 오류: {e}")
+                except RouteRepositoryError as exc:
+                    st.error(str(exc))
 
         from weather_advice_preview import render_admin_preview
         render_admin_preview(st.session_state['is_admin'], st.session_state['preview_user'])
@@ -511,7 +674,7 @@ with main_tab_target:
         
         is_leave = "퇴근" in str(sel_route)
         trip_type = "퇴근길" if is_leave else "출근길"
-        boarding_options, arrival_options = route_stop_options(stops, is_leave)
+        boarding_options, arrival_options = route_stop_options(route_stops, is_leave)
 
         # Reset before creating stop widgets, even when routes share stop names.
         # On the first render, preserve any selections restored by OAuth.
@@ -557,13 +720,13 @@ with main_tab_target:
         else:
             PANGYO_2ND_LAT = 37.412605
             PANGYO_2ND_LON = 127.095703
-            arrive_row = {
+            arrive_row = next((i for i in route_stops if i.get('is_default_dropoff')), None) or {
                 'stop_name': "판교 제2테크노밸리",
                 'lat': PANGYO_2ND_LAT,
                 'lon': PANGYO_2ND_LON
             }
-            arrive_lat = PANGYO_2ND_LAT
-            arrive_lon = PANGYO_2ND_LON
+            arrive_lat = float(arrive_row.get('lat', PANGYO_2ND_LAT))
+            arrive_lon = float(arrive_row.get('lon', PANGYO_2ND_LON))
         
         board_lat = float(board_row.get('lat', 37.3947))
         board_lon = float(board_row.get('lon', 127.1111))

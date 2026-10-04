@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 
 import requests
 import demo_support as support
+import route_repository
 import weather_api
 
 
@@ -29,6 +30,17 @@ class DemoTests(unittest.TestCase):
         self.assertEqual(options(stops, True), (['A'], stops))
         self.assertEqual(options(['A', 'B'], False)[1], ['판교 제2테크노밸리'])
         self.assertEqual(stops, ['A', 'B', 'D (하차만)', 'E (하차만)', '판교'])
+
+        db_rows = [
+            {"stop_name": "A", "boarding_allowed": True,
+             "alighting_allowed": False, "is_default_dropoff": False},
+            {"stop_name": "D (하차만)", "boarding_allowed": False,
+             "alighting_allowed": True, "is_default_dropoff": False},
+            {"stop_name": "판교 제2테크노밸리", "boarding_allowed": False,
+             "alighting_allowed": True, "is_default_dropoff": True},
+        ]
+        self.assertEqual(options(db_rows, False),
+                         (["A"], ["판교 제2테크노밸리", "D (하차만)"]))
 
     def test_signed_temperatures(self):
         parse = app_functions("parse_temp")["parse_temp"]
@@ -126,6 +138,36 @@ class AppFlowTests(unittest.TestCase):
             "active_days": [0, 1, 2, 3, 4], "active_push_devices": 0,
         }
         self.next_favorite_id = 1
+        self.route_rows = json.loads(Path("routes_db.json").read_text(encoding="utf-8"))
+        admin_rows = []
+        identity_map = {}
+        for index, row in enumerate(self.route_rows, start=1):
+            key = f"route-stop:{index}"
+            admin_rows.append(dict(row, _identity_key=key))
+            identity_map[key] = {
+                "route_id": index, "route_stop_id": index, "stop_id": index,
+                "version": f"version-{index}",
+            }
+        route_repository_values = {
+            "load_routes_for_ui": lambda: list(self.route_rows),
+            "load_admin_route_snapshot": lambda: {
+                "rows": list(admin_rows), "identity_map": dict(identity_map),
+                "snapshots": {"gyeonggi": "gy", "seoul": "se"},
+            },
+            "preview_region_reconcile": Mock(),
+            "reconcile_region_routes": Mock(),
+            "reconcile_admin_route_edits": Mock(),
+            "update_route_stop_coordinates": Mock(),
+        }
+        self.route_patchers = [
+            patch(f"route_repository.{name}", side_effect=value)
+            for name, value in route_repository_values.items()
+        ]
+        self.route_mocks = {
+            name: patcher.start()
+            for name, patcher in zip(route_repository_values, self.route_patchers)
+        }
+        self.route_loader_mock = self.route_mocks["load_routes_for_ui"]
 
         def create_favorite(_user_id, item):
             identity = (item["route_name"], item["board_stop"], item["arrive_stop"])
@@ -186,6 +228,8 @@ class AppFlowTests(unittest.TestCase):
         }
 
     def tearDown(self):
+        for patcher in reversed(self.route_patchers):
+            patcher.stop()
         for patcher in reversed(self.repository_patchers):
             patcher.stop()
         self.comment_client.stop()
@@ -283,7 +327,7 @@ class AppFlowTests(unittest.TestCase):
                                             ('출근 테스트', '탑승A', 37.2),
                                             ('출근 테스트', 'D (하차만)', 37.3),
                                             ('출근 테스트', 'E (하차만)', 37.4)]]
-        with patch.object(weather_api, 'load_routes_from_db', return_value=fixtures):
+        with patch.object(route_repository, 'load_routes_for_ui', return_value=fixtures):
             app = self.login(12345)
             app.selectbox(key='user_rt').select('출근 테스트').run()
             self.assertEqual(len(app.exception), 0)
@@ -346,6 +390,64 @@ class AppFlowTests(unittest.TestCase):
             5070327065, "PUSH"
         )
 
+    def test_admin_grid_saves_to_aiven_without_writing_route_json(self):
+        before = Path("routes_db.json").read_bytes()
+        app = self.login(5070327065)
+
+        next(b for b in app.button if b.label == "💾 그리드 변경사항 저장").click().run()
+
+        self.route_mocks["reconcile_admin_route_edits"].assert_called_once()
+        self.assertEqual(Path("routes_db.json").read_bytes(), before)
+        kwargs = self.route_mocks["reconcile_admin_route_edits"].call_args.kwargs
+        self.assertEqual(kwargs["expected_snapshots"], {"gyeonggi": "gy", "seoul": "se"})
+        self.assertTrue(kwargs["identity_map"])
+
+    def test_admin_route_preview_requires_explicit_change_candidate_decision(self):
+        app = self.login(5070327065)
+        app.session_state["route_import_pending_seoul"] = {
+            "rows": [],
+            "preview": {
+                "snapshot": "se", "routes_added": 0, "routes_updated": 1,
+                "routes_deactivated": 0, "stops_added": 1,
+                "stops_updated": 0, "stops_removed": 1,
+                "conflicts": [],
+                "change_candidates": [{
+                    "candidate_id": "route:1:stop:2",
+                    "route_name": "(퇴근) 서울시청 1호", "stop_order": 3,
+                    "current_stop_name": "SK타워 앞", "proposed_stop_name": "SKT타워 앞",
+                    "fields": [{"field": "stop_name", "current": "SK타워 앞",
+                                "proposed": "SKT타워 앞"}], "decision": None,
+                }],
+                "unresolved_candidates": ["route:1:stop:2"],
+                "details": [{
+                    "route_name": "(퇴근) 서울시청 1호", "stop_name": "SKT타워 앞",
+                    "change_type": "CHANGE_CANDIDATE", "field": "stop_name",
+                    "current": "SK타워 앞", "proposed": "SKT타워 앞",
+                }],
+            },
+        }
+
+        app.run()
+
+        self.assertTrue(any(item.label == "상세 변경 내역 (1건)" for item in app.expander))
+        self.assertTrue(app.button(key="save_route_import_seoul").disabled)
+        self.assertTrue(any("stop_name" in item.value for item in app.caption))
+        choice = app.selectbox(key="route_change_seoul_route:1:stop:2")
+        choice.select("APPLY")
+        app.run()
+        self.assertFalse(app.button(key="save_route_import_seoul").disabled)
+
+    def test_admin_coordinate_update_uses_route_stop_identity(self):
+        app = self.login(5070327065)
+        with patch.object(weather_api, "get_coordinates_by_gemini", return_value=(37.5, 127.2)):
+            next(b for b in app.button
+                 if b.label == "🎯 선택 정류장 좌표 재계산 및 갱신").click().run()
+
+        self.route_mocks["update_route_stop_coordinates"].assert_called_once()
+        args = self.route_mocks["update_route_stop_coordinates"].call_args
+        self.assertIsInstance(args.args[0], int)
+        self.assertIn("expected_version", args.kwargs)
+
     def test_settings_database_failure_is_safe_and_has_no_json_fallback(self):
         from user_settings_repository import UserSettingsError
         self.repository_mocks["get_user_dashboard_data"].side_effect = UserSettingsError(
@@ -358,6 +460,20 @@ class AppFlowTests(unittest.TestCase):
         self.assertTrue(favorite.disabled)
         self.assertFalse(any("등록된 통합 즐겨찾기가 없습니다" in item.value for item in app.info))
 
+    def test_route_database_failure_is_safe_and_has_no_json_fallback(self):
+        from route_repository import RouteRepositoryError
+        self.route_loader_mock.side_effect = RouteRepositoryError(
+            "노선 정보를 불러오지 못했습니다. 잠시 후 다시 시도해 주세요."
+        )
+
+        app = self.AppTest.from_string(self.source).run(timeout=15)
+
+        self.assertEqual(len(app.exception), 0)
+        self.assertTrue(any("노선 정보를 불러오지 못했습니다" in item.value
+                            for item in app.error))
+        self.assertTrue(any("등록된 노선 데이터가 없습니다" in item.value
+                            for item in app.info))
+
     def test_route_changes_reset_stops_even_when_names_overlap(self):
         routes = {
             '출근 A': ['A 기본', '공통 탑승', '공통 (하차만)'],
@@ -368,7 +484,7 @@ class AppFlowTests(unittest.TestCase):
         fixtures = [dict(region='seoul', route_name=route, stop_name=stop,
                          arrival_time='07:10', lat=37.3, lon=127.1)
                     for route, stops in routes.items() for stop in stops]
-        with patch.object(weather_api, 'load_routes_from_db', return_value=fixtures):
+        with patch.object(route_repository, 'load_routes_for_ui', return_value=fixtures):
             app = self.AppTest.from_string(self.source).run(timeout=15)
             for source, destination in [('출근 A', '출근 B'),
                                         ('출근 B', '(퇴근) A'),

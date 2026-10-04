@@ -141,7 +141,9 @@ SELECT f.id, rg.code, r.name, r.trip_type,
   JOIN route_stops ars ON ars.id=f.alighting_route_stop_id AND ars.route_id=f.route_id
   JOIN stops als ON als.id=ars.stop_id
   JOIN favorite_notifications fn ON fn.favorite_id=f.id
- WHERE u.kakao_user_id=%s AND u.enabled=TRUE
+ WHERE u.kakao_user_id=%s AND u.enabled=TRUE AND f.active=TRUE
+   AND r.active=TRUE AND brs.active=TRUE AND ars.active=TRUE
+   AND bs.active=TRUE AND als.active=TRUE
  ORDER BY f.created_at, f.id
 """
 
@@ -173,7 +175,9 @@ SELECT f.id, rg.code, r.name, r.trip_type,
   JOIN route_stops ars ON ars.id=f.alighting_route_stop_id AND ars.route_id=f.route_id
   JOIN stops als ON als.id=ars.stop_id
   JOIN favorite_notifications fn ON fn.favorite_id=f.id
- WHERE f.user_id=%s
+ WHERE f.user_id=%s AND f.active=TRUE
+   AND r.active=TRUE AND brs.active=TRUE AND ars.active=TRUE
+   AND bs.active=TRUE AND als.active=TRUE
  ORDER BY f.created_at, f.id
 """
 
@@ -263,7 +267,8 @@ def _resolve_route_stop(cursor, route_id, selection, prefix, required_permission
         "SELECT rs.id, rs.stop_order, rs.scheduled_time, rs.boarding_allowed, "
         "rs.alighting_allowed, rs.is_default_dropoff, rs.source_kind "
         "FROM route_stops rs JOIN stops s ON s.id=rs.stop_id "
-        "WHERE rs.route_id=%s AND s.name=%s AND s.latitude=%s AND s.longitude=%s",
+        "WHERE rs.route_id=%s AND rs.active=TRUE AND s.active=TRUE "
+        "AND s.name=%s AND s.latitude=%s AND s.longitude=%s",
         (route_id, selection[f"{prefix}_stop"], _coordinate(selection[f"{prefix}_lat"]),
          _coordinate(selection[f"{prefix}_lon"])),
     )
@@ -305,7 +310,8 @@ def create_favorite(
                 destination = _resolve_route_stop(cursor, route_id, selection, "arrive", "alighting")
                 if expected_trip == "evening":
                     cursor.execute(
-                        "SELECT id FROM route_stops WHERE route_id=%s ORDER BY stop_order LIMIT 1",
+                        "SELECT id FROM route_stops WHERE route_id=%s AND active=TRUE "
+                        "ORDER BY stop_order LIMIT 1",
                         (route_id,),
                     )
                     if cursor.fetchone()[0] != boarding[0]:
@@ -376,6 +382,7 @@ def update_favorite_notification(
                 cursor.execute(
                     "UPDATE favorite_notifications fn SET enabled=%s, lead_minutes=%s "
                     "FROM favorites f WHERE f.id=fn.favorite_id AND f.id=%s AND f.user_id=%s "
+                    "AND f.active=TRUE "
                     "RETURNING fn.favorite_id",
                     (enabled, lead_minutes, favorite_id, user_id),
                 )

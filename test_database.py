@@ -133,12 +133,13 @@ def test_notification_channel_migration_is_additive_and_safe_for_existing_users(
     assert "DROP TABLE" not in sql.upper()
 
 
-def test_project_migrations_keep_existing_versions_and_add_v3_in_order():
+def test_project_migrations_keep_existing_versions_and_add_route_lifecycle_in_order():
     migrations = discover_migrations(Path("migrations"))
     assert [(item.version, item.name) for item in migrations] == [
         ("001", "initial_schema"),
         ("002", "notification_channel"),
         ("003", "notification_history"),
+        ("004", "route_lifecycle"),
     ]
 
 
@@ -152,3 +153,13 @@ def test_notification_history_migration_has_atomic_identity_and_no_message_conte
     lowered = sql.lower()
     for forbidden in ("message_body", "message_title", "endpoint", "p256dh", "auth", "kakao_user_id"):
         assert forbidden not in lowered
+
+
+def test_route_lifecycle_migration_adds_soft_delete_without_touching_history():
+    sql = Path("migrations/004_route_lifecycle.sql").read_text("utf-8")
+    assert "ALTER TABLE route_stops" in sql and "active BOOLEAN" in sql
+    assert "ALTER TABLE favorites" in sql and "inactive_reason" in sql
+    assert "ALTER TABLE routes" in sql and "ROUTE_REMOVED" in sql
+    assert "WHERE active" in sql
+    assert "DELETE FROM" not in sql.upper()
+    assert "notification_runs" not in sql and "notification_deliveries" not in sql
