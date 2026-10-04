@@ -15,6 +15,8 @@ EXPECTED_TABLES = {
     "schema_migrations", "regions", "routes", "stops", "route_stops", "users",
     "kakao_credentials", "notification_settings", "notification_active_days",
     "favorites", "favorite_notifications", "push_subscriptions",
+    "service_settings",
+    "notification_runs", "notification_deliveries",
 }
 
 
@@ -38,7 +40,34 @@ def test_aiven_health_and_v1_schema():
             )
             assert cursor.fetchone() == ("001", 64)
             cursor.execute("SELECT count(*) FROM push_subscriptions")
+            assert cursor.fetchone()[0] >= 0
+            cursor.execute(
+                "SELECT version, char_length(checksum) FROM schema_migrations WHERE version = '002'"
+            )
+            assert cursor.fetchone() == ("002", 64)
+            cursor.execute(
+                "SELECT version, char_length(checksum) FROM schema_migrations WHERE version = '003'"
+            )
+            assert cursor.fetchone() == ("003", 64)
+            cursor.execute(
+                "SELECT version, char_length(checksum) FROM schema_migrations WHERE version = '004'"
+            )
+            assert cursor.fetchone() == ("004", 64)
+            cursor.execute("SELECT notification_channel_policy FROM service_settings")
+            assert cursor.fetchone() == ("AUTO",)
+            cursor.execute(
+                "SELECT count(*) FROM notification_settings WHERE delivery_channel IS NULL "
+                "OR delivery_channel NOT IN ('PUSH', 'KAKAO')"
+            )
             assert cursor.fetchone() == (0,)
+            cursor.execute(
+                "SELECT column_default, is_nullable FROM information_schema.columns "
+                "WHERE table_schema='public' AND table_name='notification_settings' "
+                "AND column_name='delivery_channel'"
+            )
+            default, nullable = cursor.fetchone()
+            assert "KAKAO" in default
+            assert nullable == "NO"
 
 
 def test_v1_constraints_and_indexes_exist():
@@ -54,18 +83,27 @@ def test_v1_constraints_and_indexes_exist():
             )
             names = {row[0] for row in cursor.fetchall()}
             assert names == {
-                "uq_routes_region_name", "uq_route_stops_route_order",
+                "uq_routes_region_name",
                 "uq_route_stops_id_route", "fk_favorites_boarding_route_stop",
                 "fk_favorites_alighting_route_stop", "uq_favorites_selection",
             }
             cursor.execute(
-                "SELECT indexname FROM pg_indexes WHERE schemaname = 'public' AND indexname = ANY(%s)",
+                "SELECT indexname, indexdef FROM pg_indexes "
+                "WHERE schemaname = 'public' AND indexname = ANY(%s)",
                 ([
                     "idx_routes_region_active_name", "idx_stops_region_name",
                     "idx_route_stops_scheduled_time", "uq_route_stops_default_dropoff",
                     "idx_notification_days_weekday_user", "idx_favorite_notifications_enabled",
                     "idx_push_subscriptions_enabled_user",
                     "idx_push_subscriptions_enabled_expiration",
+                    "uq_route_stops_route_order_active",
+                    "idx_route_stops_active_route_order", "idx_favorites_active_user",
                 ],),
             )
-            assert len(cursor.fetchall()) == 8
+            indexes = dict(cursor.fetchall())
+            assert "idx_route_stops_active_route_order" not in indexes
+            assert "uq_route_stops_route_order_active" in indexes
+            definition = indexes["uq_route_stops_route_order_active"].lower()
+            assert "create unique index" in definition
+            assert "where active" in definition
+            assert len(indexes) == 10

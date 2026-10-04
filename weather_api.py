@@ -8,7 +8,13 @@ from datetime import datetime, timedelta, timezone
 import urllib.parse
 import logging
 
+from route_repository import normalize_stop_name_for_matching, route_logical_identity
+
 logger = logging.getLogger(__name__)
+
+
+class GeocodingError(RuntimeError):
+    """Raised when a route stop cannot be assigned verified coordinates."""
 
 load_dotenv()
 
@@ -19,10 +25,12 @@ client = None
 if GEMINI_API_KEY:
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
-    except Exception as e:
-        print(f"[LOG ERROR] google.genai 클라이언트 초기화 실패: {e}")
+    except Exception as exc:
+        logger.error(
+            "Gemini client initialization failed type=%s",
+            type(exc).__name__,
+        )
 
-DB_FILE = "routes_db.json"
 
 def latlon_to_grid(lat, lon):
     """위경도 좌표를 기상청 격자 좌표(NX, NY)로 변환합니다."""
@@ -62,23 +70,12 @@ def latlon_to_grid(lat, lon):
     y = math.floor(ro - ra * math.cos(theta) + YO + 0.5)
     return int(x), int(y)
 
-def load_routes_from_db():
-    """저장된 노선 및 정류장 위치 DB를 불러옵니다."""
-    if os.path.exists(DB_FILE):
-        try:
-            with open(DB_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            print(f"[LOG] DB 로드 중 오류 발생: {e}")
-            return []
-    return []
-
 def get_coordinates_by_gemini(stop_name):
-    """정류장 이름으로 위도/경도를 찾고 최신 google.genai 패키지와 상세 에러 로그를 출력합니다."""
+    """Return verified coordinates or fail without inventing a fallback location."""
     print(f"[LOG] 지오코딩 요청 - 정류장: '{stop_name}'")
     if not GEMINI_API_KEY or not client:
-        print("[LOG ERROR] GEMINI_API_KEY가 설정되어 있지 않거나 클라이언트가 초기화되지 않았습니다.")
-        return (37.3947, 127.1111)
+        logger.error("Route geocoding unavailable reason=CLIENT_UNAVAILABLE")
+        raise GeocodingError("정류장 좌표를 확인할 수 없습니다.")
         
     prompt = f"""
 너는 대한민국 지리/위치 정보 전문가야. 아래 정류장 이름과 주소를 참고하여, 대한민국 내 실제 위치의 위도(latitude)와 경도(longitude) 소수점 좌표를 찾아내 줘.
@@ -91,6 +88,7 @@ def get_coordinates_by_gemini(stop_name):
 """
     models_to_try = ["gemini-3.6-flash"]
     
+    last_error = None
     for m_name in models_to_try:
         try:
             print(f"[LOG] 모델 시도 중: {m_name}")
@@ -99,7 +97,7 @@ def get_coordinates_by_gemini(stop_name):
                 contents=prompt,
             )
             text = response.text.strip()
-            print(f"[LOG] 모델({m_name}) 응답 수신 완료. 원본 텍스트: {text}")
+            print(f"[LOG] 모델({m_name}) 응답 수신 완료.")
             
             match = re.search(r'\{.*\}', text, re.DOTALL)
             if match:
@@ -114,70 +112,160 @@ def get_coordinates_by_gemini(stop_name):
                     return lat, lon
                 else:
                     print(f"[LOG WARNING] 좌표가 대한민국 유효 범위를 벗어났습니다. (Lat: {lat}, Lon: {lon})")
+                    last_error = "INVALID_COORDINATES"
             else:
                 print(f"[LOG WARNING] 응답 텍스트에서 JSON 형식을 찾지 못했습니다.")
+                last_error = "INVALID_RESPONSE"
                 
         except Exception as e:
-            print(f"[LOG ERROR] 모델({m_name}) 호출/파싱 중 예외 발생: {type(e).__name__} - {str(e)}")
+            last_error = type(e).__name__
+            logger.warning(
+                "Route geocoding request failed model=%s type=%s",
+                m_name, type(e).__name__,
+            )
             continue
             
-    print(f"[LOG] 모든 Gemini 시도 실패. 기본 좌표(판교) 반환.")
-    return (37.3947, 127.1111)
+    logger.error("Route geocoding failed reason=%s", last_error or "NO_VALID_RESULT")
+    raise GeocodingError("정류장 좌표를 확인할 수 없습니다.")
 
-def update_single_route_coordinate(target_stop_name, target_route_name):
-    """특정 정류장 단건의 좌표를 다시 계산하여 DB를 업데이트합니다."""
-    print(f"[LOG] 단건 좌표 재조회 -> 노선: {target_route_name}, 정류장: {target_stop_name}")
-    db_data = load_routes_from_db()
-    if not db_data:
-        return False, "저장된 DB 데이터가 없습니다."
-    
-    new_lat, new_lon = get_coordinates_by_gemini(target_stop_name)
-    
-    if new_lat == 37.3947 and new_lon == 127.1111:
-        return False, f"'{target_stop_name}' 지오코딩(Gemini) 실패로 인해 기본 좌표(판교)가 반환되어 업데이트가 취소되었습니다."
-    
-    new_nx, new_ny = latlon_to_grid(new_lat, new_lon)
-    
-    updated = False
-    for item in db_data:
-        if item.get("stop_name") == target_stop_name and item.get("route_name") == target_route_name:
-            item["lat"] = new_lat
-            item["lon"] = new_lon
-            item["nx"] = new_nx
-            item["ny"] = new_ny
-            item["status"] = "✅ 정상 (단건 재조회)"
-            updated = True
-            
-    if updated:
-        with open(DB_FILE, "w", encoding="utf-8") as f:
-            json.dump(db_data, f, ensure_ascii=False, indent=4)
-        print(f"[LOG] 단건 DB 업데이트 성공.")
-        return True, f"'{target_stop_name}' 정류장 좌표가 성공적으로 재조회되었습니다! (위도: {new_lat}, 경도: {new_lon})"
-    else:
-        return False, "해당 정류장을 DB에서 찾지 못했습니다."
+def normalize_route_document_times(parsed_data):
+    """Apply deterministic timetable rules after Gemini document parsing."""
+    normalized = []
+    current_route = None
+    route_order = 0
+    for item in parsed_data:
+        row = dict(item)
+        route_name = str(row.get("route_name", "")).strip()
+        route_identity = route_logical_identity(route_name)
+        if route_identity != current_route:
+            current_route = route_identity
+            route_order = 0
+        route_order += 1
+        row["_route_stop_order"] = route_order
+        if "퇴근" in route_name and route_order > 1:
+            row["arrival_time"] = ""
+        normalized.append(row)
+    return normalized
 
-def save_routes_with_sequential_geocoding(parsed_data, target_region="gyeonggi", progress_callback=None):
+
+def _has_reusable_coordinates(row):
+    """Return whether a stored stop has the complete coordinate data used by the UI."""
+    try:
+        latitude = float(row.get("lat"))
+        longitude = float(row.get("lon"))
+        int(row.get("nx"))
+        int(row.get("ny"))
+    except (TypeError, ValueError):
+        return False
+    return 33.0 <= latitude <= 43.0 and 124.0 <= longitude <= 132.0
+
+
+def prepare_routes_with_sequential_geocoding(
+    parsed_data, target_region="gyeonggi", progress_callback=None, existing_rows=None,
+):
+    """Geocode parsed document rows without reading or writing route storage."""
+    parsed_data = normalize_route_document_times(parsed_data)
     print(f"[LOG] 일괄 지오코딩 시작 [대상 지역: {target_region}] - 총 파싱 아이템 수: {len(parsed_data)}")
-    
-    unique_stops = {}
+
+    existing_index = {}
+    existing_position_index = {}
+    existing_route_counts = {}
+    for row in existing_rows or []:
+        if row.get("region", "gyeonggi") != target_region:
+            continue
+        if row.get("source_kind") == "system_default" or row.get("is_default_dropoff"):
+            continue
+        route_identity = route_logical_identity(row.get("route_name"))
+        key = (
+            route_identity,
+            normalize_stop_name_for_matching(row.get("stop_name")),
+        )
+        existing_index.setdefault(key, []).append(row)
+        existing_route_counts[route_identity] = existing_route_counts.get(route_identity, 0) + 1
+        stop_order = row.get("stop_order", row.get("_stop_order"))
+        if stop_order is not None:
+            existing_position_index.setdefault((route_identity, int(stop_order)), []).append(row)
+
+    parsed_key_counts = {}
+    parsed_route_counts = {}
+    for item in parsed_data:
+        route_identity = route_logical_identity(item.get("route_name"))
+        key = (
+            route_identity,
+            normalize_stop_name_for_matching(item.get("stop_name")),
+        )
+        parsed_key_counts[key] = parsed_key_counts.get(key, 0) + 1
+        parsed_route_counts[route_identity] = parsed_route_counts.get(route_identity, 0) + 1
+
+    matched_existing = {}
+    geocode_stops = {}
     for item in parsed_data:
         stop_name = item.get("stop_name", "").strip()
-        if stop_name and stop_name not in unique_stops:
-            unique_stops[stop_name] = True
+        route_identity = route_logical_identity(item.get("route_name"))
+        key = (
+            route_identity,
+            normalize_stop_name_for_matching(stop_name),
+        )
+        candidates = existing_index.get(key, [])
+        match_kind = "name"
+        if not (len(candidates) == 1 and parsed_key_counts.get(key) == 1):
+            position_key = (route_identity, item["_route_stop_order"])
+            position_candidates = existing_position_index.get(position_key, [])
+            same_route_shape = (
+                existing_route_counts.get(route_identity) == parsed_route_counts.get(route_identity)
+            )
+            if len(position_candidates) == 1 and same_route_shape:
+                candidates = position_candidates
+                match_kind = "position"
+            else:
+                candidates = []
+        if len(candidates) == 1 and _has_reusable_coordinates(candidates[0]):
+            matched_existing[id(item)] = candidates[0]
+            logger.info(
+                "[COORD_REUSE] route=%s stop=%s reused=True match=%s",
+                item.get("route_name"), stop_name, match_kind,
+            )
+            continue
 
-    unique_stop_names = list(unique_stops.keys())
-    total_unique = len(unique_stop_names)
+        reason = "MISSING_COORDINATES" if candidates else "NEW_STOP"
+        geocode_key = (route_identity, normalize_stop_name_for_matching(stop_name))
+        if not stop_name:
+            raise GeocodingError("정류장명이 비어 있어 좌표를 확인할 수 없습니다.")
+        if geocode_key not in geocode_stops:
+            geocode_stops[geocode_key] = {
+                "route_name": item.get("route_name"),
+                "stop_name": stop_name,
+                "reason": reason,
+            }
+        logger.info(
+            "[GEOCODE] route=%s stop=%s reason=%s",
+            item.get("route_name"), stop_name, reason,
+        )
+
+    geocode_items = list(geocode_stops.items())
+    total_unique = len(geocode_items)
     print(f"[LOG] 고유 정류장 수: {total_unique}개 (중복 제거됨)")
     
     calculated_coords = {}
-    for idx, stop_name in enumerate(unique_stop_names):
+    for idx, (geocode_key, geocode_item) in enumerate(geocode_items):
+        route_name = geocode_item["route_name"]
+        stop_name = geocode_item["stop_name"]
         if progress_callback:
             progress_callback(idx + 1, total_unique, stop_name)
             
-        lat, lon = get_coordinates_by_gemini(stop_name)
+        try:
+            lat, lon = get_coordinates_by_gemini(stop_name)
+        except Exception as exc:
+            logger.error(
+                "[ROUTE_IMPORT_ERROR] stage=route_geocoding route=%s stop=%s type=%s",
+                route_name, stop_name, type(exc).__name__,
+            )
+            if isinstance(exc, GeocodingError):
+                raise
+            raise GeocodingError("정류장 좌표를 확인할 수 없습니다.") from exc
         nx, ny = latlon_to_grid(lat, lon)
         
-        calculated_coords[stop_name] = {
+        calculated_coords[geocode_key] = {
             "lat": lat,
             "lon": lon,
             "nx": nx,
@@ -187,7 +275,26 @@ def save_routes_with_sequential_geocoding(parsed_data, target_region="gyeonggi",
     new_results = []
     for item in parsed_data:
         stop_name = item.get("stop_name", "").strip()
-        coord_info = calculated_coords.get(stop_name, {"lat": 37.3947, "lon": 127.1111, "nx": 60, "ny": 127})
+        existing = matched_existing.get(id(item))
+        if existing is not None:
+            coord_info = {
+                "lat": existing["lat"], "lon": existing["lon"],
+                "nx": existing["nx"], "ny": existing["ny"],
+                "status": existing.get("status"),
+            }
+        else:
+            geocode_key = (
+                route_logical_identity(item.get("route_name")),
+                normalize_stop_name_for_matching(stop_name),
+            )
+            coord_info = calculated_coords.get(geocode_key)
+            if coord_info is None:
+                logger.error(
+                    "[ROUTE_IMPORT_ERROR] stage=route_geocoding_result "
+                    "route=%s stop=%s reason=MISSING_RESULT",
+                    item.get("route_name"), stop_name,
+                )
+                raise GeocodingError("정류장 좌표 결과를 확인할 수 없습니다.")
         
         new_results.append({
             "route_name": item.get("route_name", "기본 노선"),
@@ -198,23 +305,11 @@ def save_routes_with_sequential_geocoding(parsed_data, target_region="gyeonggi",
             "lon": coord_info["lon"],
             "nx": coord_info["nx"],
             "ny": coord_info["ny"],
-            "status": "✅ 정상"
+            "status": coord_info.get("status") or "✅ 정상"
         })
     
-    existing_data = load_routes_from_db()
-
-    preserved_data = [
-        item for item in existing_data 
-        if item.get("region", "gyeonggi") != target_region
-    ]
-    
-    final_results = preserved_data + new_results
-    
-    with open(DB_FILE, "w", encoding="utf-8") as f:
-        json.dump(final_results, f, ensure_ascii=False, indent=4)
-        
-    print(f"[LOG] 지역별 병합 저장 완료. 총 데이터 수: {len(final_results)}개")
-    return final_results
+    print(f"[LOG] 지역별 노선 데이터 준비 완료. 총 데이터 수: {len(new_results)}개")
+    return new_results
 
 # All timetable/API times are Korea Standard Time, including on Windows.
 KST = timezone(timedelta(hours=9))

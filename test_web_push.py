@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -153,7 +154,9 @@ def test_service_worker_and_component_keep_web_push_isolated():
     assert "width: 100%" in component
     assert "eval(" not in component
     assert "weather_api" not in component
-    assert "kakao" not in component.lower()
+    assert "server_state" in component
+    assert "unsubscribed_subscription" in component
+    assert "service_worker_scope" in component
 
 
 def test_web_push_ui_renders_without_vapid_secrets():
@@ -166,4 +169,84 @@ def test_web_push_ui_renders_without_vapid_secrets():
     ).run()
 
     assert not app.exception
-    assert any("VAPID 환경설정" in info.value for info in app.info)
+    assert any("로그인 후" in info.value for info in app.info)
+
+
+def test_web_push_display_state_has_one_authoritative_result():
+    from push_subscription_store import OWNERSHIP_CURRENT, OWNERSHIP_NONE, OWNERSHIP_OTHER
+    from web_push_ui import DB_UNAVAILABLE, web_push_display_state
+
+    assert web_push_display_state(False, OWNERSHIP_CURRENT) == "NO_BROWSER_SUBSCRIPTION"
+    assert web_push_display_state(True, OWNERSHIP_CURRENT) == "REGISTERED_TO_CURRENT_USER"
+    assert web_push_display_state(True, OWNERSHIP_OTHER) == "REGISTERED_TO_OTHER_USER"
+    assert web_push_display_state(True, OWNERSHIP_NONE) == "REGISTERED_TO_OTHER_USER"
+    assert web_push_display_state(True, DB_UNAVAILABLE) == "DB_UNAVAILABLE"
+
+
+def test_component_uses_db_ownership_before_rendering_registered_state():
+    import web_push_ui
+
+    component = web_push_ui._COMPONENT_JS
+    assert "data.server_state === 'current' ? 'registered' : 'browser_only'" in component
+    assert "data.server_state === 'unavailable'" in component
+    assert "data.server_state === 'unknown'" in component
+    assert "['registered', 'db_unavailable', 'loading'].includes(state)" in component
+    assert "data.server_registered" not in component
+    assert component.count("setStateValue(") == 1
+    assert "setStateValue('event'" in component
+
+
+def test_coherent_push_event_is_processed_once_and_invalidates_on_mutation():
+    from web_push_ui import handle_web_push_event
+
+    session = {"web_push_db_ownership": "unknown"}
+    register = Mock()
+    invalidate = Mock()
+    event = {
+        "action": "register", "action_id": "one", "browser_status": "loading",
+        "subscription": VALID_SUBSCRIPTION, "app_url": "http://localhost:8501/",
+        "unsubscribed_subscription": None,
+    }
+    assert handle_web_push_event(
+        session, 101, event, registerer=register, on_data_changed=invalidate
+    )
+    register.assert_called_once_with(101, VALID_SUBSCRIPTION)
+    invalidate.assert_called_once()
+    assert session["web_push_db_ownership"] == "current"
+    assert not handle_web_push_event(
+        session, 101, event, registerer=register, on_data_changed=invalidate
+    )
+    register.assert_called_once()
+
+
+def test_push_inspect_reruns_only_when_ownership_changes_and_unsubscribe_invalidates():
+    from web_push_ui import handle_web_push_event
+
+    session = {
+        "web_push_subscription": VALID_SUBSCRIPTION,
+        "web_push_db_ownership": "unknown",
+    }
+    ownership = Mock(return_value="current")
+    inspect = {
+        "action": "inspect", "action_id": "inspect-1", "browser_status": "loading",
+        "subscription": VALID_SUBSCRIPTION, "app_url": "",
+    }
+    assert handle_web_push_event(session, 101, inspect, ownership_loader=ownership)
+    same_state = {**inspect, "action_id": "inspect-2"}
+    assert not handle_web_push_event(session, 101, same_state, ownership_loader=ownership)
+    ownership.assert_called_once_with(101, VALID_SUBSCRIPTION)
+
+    deactivate = Mock()
+    invalidate = Mock()
+    unsubscribe = {
+        "action": "unsubscribe", "action_id": "unsubscribe-1",
+        "browser_status": "unsubscribed", "subscription": None,
+        "unsubscribed_subscription": VALID_SUBSCRIPTION, "app_url": "",
+    }
+    assert handle_web_push_event(
+        session, 101, unsubscribe, deactivator=deactivate,
+        on_data_changed=invalidate,
+    )
+    deactivate.assert_called_once_with(101, VALID_SUBSCRIPTION)
+    invalidate.assert_called_once()
+    assert session["web_push_db_ownership"] == "none"

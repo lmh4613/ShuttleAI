@@ -83,11 +83,15 @@ def valid_click_url(value: str) -> bool:
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
-def build_test_payload(click_url: str = "") -> str:
-    payload = {"title": PUSH_TITLE, "body": PUSH_BODY}
+def build_push_payload(title: str, body: str, click_url: str = "") -> str:
+    payload = {"title": title, "body": body}
     if click_url and valid_click_url(click_url):
         payload["url"] = click_url
     return json.dumps(payload, ensure_ascii=False)
+
+
+def build_test_payload(click_url: str = "") -> str:
+    return build_push_payload(PUSH_TITLE, PUSH_BODY, click_url)
 
 
 def sync_subscription(
@@ -123,8 +127,26 @@ def send_test_push(
     config: WebPushConfig,
     click_url: str = "",
     sender: Callable | None = None,
+    expired_handler: Callable[[], None] | None = None,
 ) -> tuple[bool, str]:
     """Send the fixed PoC notification without invoking app weather or Kakao APIs."""
+    return send_web_push(
+        subscription, config, PUSH_TITLE, PUSH_BODY, click_url,
+        sender=sender, expired_handler=expired_handler,
+    )
+
+
+def send_web_push(
+    subscription: object,
+    config: WebPushConfig,
+    title: str,
+    body: str,
+    click_url: str = "",
+    *,
+    sender: Callable | None = None,
+    expired_handler: Callable[[], None] | None = None,
+) -> tuple[bool, str]:
+    """Send one validated payload without logging subscription secrets."""
     if not config.ready:
         return False, "VAPID 설정이 완료되지 않았습니다."
 
@@ -142,7 +164,7 @@ def send_test_push(
     try:
         sender(
             subscription_info=normalized,
-            data=build_test_payload(target_url),
+            data=build_push_payload(title, body, target_url),
             vapid_private_key=config.private_key,
             vapid_claims={"sub": config.subject},
             ttl=60,
@@ -153,5 +175,12 @@ def send_test_push(
         status_code = getattr(exc, "status_code", None)
         logger.warning("Web Push send failed status=%s type=%s", status_code, type(exc).__name__)
         if status_code in {404, 410}:
+            if expired_handler is not None:
+                try:
+                    expired_handler()
+                except Exception as handler_exc:
+                    logger.warning(
+                        "Expired Push cleanup failed type=%s", type(handler_exc).__name__
+                    )
             return False, "브라우저 구독이 만료되었습니다. 이 기기 알림을 해제한 뒤 다시 등록해 주세요."
         return False, "테스트 Push 발송에 실패했습니다. VAPID 설정과 네트워크 연결을 확인해 주세요."

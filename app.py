@@ -4,18 +4,46 @@ import requests
 import os
 import json
 import re
-import threading
-import time
 import logging
 from urllib.parse import urlencode
 from demo_support import (prepare_login, consume_login, api_request,
-                          deliver_message, message_succeeded, notify_once, SELECTION_KEYS)
-from datetime import datetime, timedelta
+                          deliver_message, message_succeeded, SELECTION_KEYS)
+from datetime import datetime
 import weather_api
 import ppt_parser
+from pdf_route_canonical import PdfCanonicalError
 from mobile_ui import inject_mobile_styles
 from web_push import load_web_push_config
 from web_push_ui import render_web_push_poc
+from user_screen_cache import get_user_screen_data, invalidate_user_screen_data
+from notification_repository import (
+    NotificationRepositoryError,
+    load_kakao_credentials,
+    save_kakao_credentials,
+)
+from notification_worker import start_notification_worker
+from route_repository import (
+    RouteConflictError,
+    RouteRepositoryError,
+    RouteValidationError,
+    StaleRouteSnapshotError,
+    load_admin_route_snapshot,
+    load_routes_for_ui,
+    preview_region_reconcile,
+    reconcile_admin_route_edits,
+    reconcile_region_routes,
+    update_route_stop_coordinates,
+)
+from user_settings_repository import (
+    DuplicateFavoriteError,
+    UserSettingsError,
+    create_favorite,
+    delete_favorite,
+    get_global_notification_policy,
+    update_favorite_notification,
+    update_global_notification_policy,
+    update_notification_settings,
+)
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -55,37 +83,22 @@ def get_user_data(user_id):
     all_data = load_user_settings()
     user_entry = all_data.get(str(user_id), {})
     if isinstance(user_entry, list):
-        # 구버전 리스트 형식 호환 및 기본 설정 추가
-        return {
-            "settings": user_entry, 
-            "access_token": "", 
-            "refresh_token": "",
-            "notification_config": {
-                "active_days": ["월", "화", "수", "목", "금"],
-                "exclude_holidays": True
-            }
-        }
-    if "notification_config" not in user_entry:
-        user_entry["notification_config"] = {
-            "active_days": ["월", "화", "수", "목", "금"],
-            "exclude_holidays": True
-        }
-    user_entry.setdefault("settings", [])
-    user_entry.setdefault("access_token", "")
-    user_entry.setdefault("refresh_token", "")
-    return user_entry
+        user_entry = {}
+    return {
+        "access_token": user_entry.get("access_token", ""),
+        "refresh_token": user_entry.get("refresh_token", ""),
+    }
 
-def save_user_data(user_id, settings_list=None, access_token=None, refresh_token=None, notification_config=None):
+
+def save_user_data(user_id, access_token=None, refresh_token=None):
     all_data = load_user_settings()
-    user_entry = get_user_data(user_id)
-    if settings_list is not None:
-        user_entry["settings"] = settings_list
+    raw_entry = all_data.get(str(user_id), {})
+    # Preserve legacy migration input, but never read or mutate its favorite/settings fields.
+    user_entry = dict(raw_entry) if isinstance(raw_entry, dict) else {}
     if access_token is not None:
         user_entry["access_token"] = access_token
     if refresh_token is not None:
         user_entry["refresh_token"] = refresh_token
-    if notification_config is not None:
-        user_entry["notification_config"] = notification_config
     all_data[str(user_id)] = user_entry
     with open(USER_SETTINGS_FILE, "w", encoding="utf-8") as f:
         json.dump(all_data, f, ensure_ascii=False, indent=4)
@@ -163,107 +176,196 @@ def get_integrated_ai_message(wb, wa, board_name, arrive_name, trip_type='출근
 
 def route_stop_options(stops, is_leave):
     """Preserve route order; only marked morning stops are extra destinations."""
+    if stops and isinstance(stops[0], dict):
+        if "boarding_allowed" in stops[0]:
+            rows = stops
+            if is_leave:
+                boarding = [row["stop_name"] for row in rows if row.get("boarding_allowed")]
+                arrival = [row["stop_name"] for row in rows if row.get("alighting_allowed")]
+                return boarding or ["정류장 없음"], arrival or ["정류장 없음"]
+            boarding = [row["stop_name"] for row in rows if row.get("boarding_allowed")]
+            arrival_rows = [row for row in rows if row.get("alighting_allowed")]
+            defaults = [row["stop_name"] for row in arrival_rows if row.get("is_default_dropoff")]
+            marked = [row["stop_name"] for row in arrival_rows
+                      if not row.get("is_default_dropoff") and "(하차만)" in row["stop_name"]]
+            arrival = list(dict.fromkeys(defaults + marked))
+            return boarding or ["정류장 없음"], arrival or ["판교 제2테크노밸리"]
+        stops = [row.get("stop_name") for row in stops]
     if is_leave:
         return stops[:1] or ["정류장 없음"], stops or ["정류장 없음"]
     boarding = [stop for stop in stops if "(하차만)" not in stop]
     arrival = list(dict.fromkeys(["판교 제2테크노밸리"] + [stop for stop in stops if "(하차만)" in stop]))
     return boarding or ["정류장 없음"], arrival
 
-# 백그라운드 자동 알림 스케줄러 워커
-def notification_background_worker():
-    sent_cache = {}
-    attempt_cache = {}
-    cache_date = None
-    weekday_map = {0: "월", 1: "화", 2: "수", 3: "목", 4: "금", 5: "토", 6: "일"}
-    
-    while True:
+
+def render_reconcile_preview(preview, *, region):
+    labels = [
+        ("추가 노선", "routes_added"), ("수정 노선", "routes_updated"),
+        ("비활성화 예정 노선", "routes_deactivated"),
+        ("추가 정류장", "stops_added"), ("수정 정류장", "stops_updated"),
+        ("제거 예정 정류장", "stops_removed"),
+    ]
+    columns = st.columns(3)
+    for index, (label, key) in enumerate(labels):
+        columns[index % 3].metric(label, preview.get(key, 0))
+    if preview.get("conflicts"):
+        st.error("노선 구조를 자동으로 확정할 수 없어 저장할 수 없습니다.")
+        for conflict in preview["conflicts"]:
+            st.caption(f"• {conflict}")
+
+    details = preview.get("details", [])
+    if details:
+        with st.expander(f"상세 변경 내역 ({len(details)}건)", expanded=False):
+            with st.container(height=320):
+                for detail in details:
+                    current = "-" if detail.get("current") is None else str(detail["current"])
+                    proposed = "-" if detail.get("proposed") is None else str(detail["proposed"])
+                    st.markdown(
+                        f"**{detail.get('route_name', '')}** · "
+                        f"{detail.get('stop_name') or '노선'} · `{detail.get('change_type', '')}`"
+                    )
+                    st.caption(
+                        f"{detail.get('field', '')}: {current} → {proposed}"
+                    )
+    decisions = {}
+    candidates = preview.get("change_candidates", [])
+    if candidates:
+        st.markdown("**관리자 선택이 필요한 변경 후보**")
+        for candidate in candidates:
+            with st.container(border=True):
+                st.markdown(
+                    f"**{candidate['route_name']} / {candidate['stop_order']}번**"
+                )
+                for field in candidate["fields"]:
+                    st.caption(
+                        f"{field['field']}: {field['current']} → {field['proposed']}"
+                    )
+                choice = st.selectbox(
+                    "처리 방법",
+                    ["", "APPLY", "KEEP_EXISTING"],
+                    format_func=lambda value: {
+                        "": "선택하세요", "APPLY": "변경 적용",
+                        "KEEP_EXISTING": "기존 값 유지",
+                    }[value],
+                    key=f"route_change_{region}_{candidate['candidate_id']}",
+                )
+                if choice:
+                    decisions[candidate["candidate_id"]] = choice
+    return decisions
+
+
+def render_route_import(region, label, uploader_key, existing_rows):
+    pending_key = f"route_import_pending_{region}"
+    success_key = f"route_import_success_{region}"
+    if st.session_state.pop(success_key, False):
+        st.success(f"{label} 노선이 Aiven에 저장되었습니다.")
+    uploaded = st.file_uploader(
+        f"{label} 셔틀 노선 파일 선택 (PDF, PPTX)",
+        type=["pdf", "pptx"], key=uploader_key,
+    )
+    if uploaded and st.button(f"{label} 데이터 분석 및 미리보기", type="primary",
+                              key=f"preview_route_import_{region}"):
+        stage = "document_parse"
         try:
-            now = datetime.now()
-            current_date_str = now.strftime("%Y-%m-%d")
-            if cache_date != current_date_str:
-                sent_cache.clear()
-                attempt_cache.clear()
-                cache_date = current_date_str
-            current_time_str = now.strftime("%H:%M")
-            current_weekday = weekday_map.get(now.weekday())
-            
-            all_data = load_user_settings()
-            for uid, entry in all_data.items():
-                if not isinstance(entry, dict):
-                    continue
-                
-                notif_config = entry.get("notification_config", {"active_days": ["월", "화", "수", "목", "금"], "exclude_holidays": True})
-                active_days = notif_config.get("active_days", ["월", "화", "수", "목", "금"])
-                exclude_holidays = notif_config.get("exclude_holidays", True)
-                
-                if current_weekday not in active_days:
-                    continue
-                if exclude_holidays and is_today_holiday():
-                    continue
-                
-                settings = entry.get("settings", [])
-                access_token = entry.get("access_token")
-                refresh_token = entry.get("refresh_token")
-                
-                for item in settings:
-                    if not item.get("notify_enabled", False):
-                        continue
-                    board_time = item.get("board_time")
-                    if not board_time or board_time == "-":
-                        continue
-                    notify_min = int(item.get("notify_min", 10))
-                    
-                    try:
-                        bt_dt = datetime.strptime(board_time, "%H:%M")
-                        boarding_dt = datetime(now.year, now.month, now.day, bt_dt.hour, bt_dt.minute)
-                        target_dt = boarding_dt - timedelta(minutes=notify_min)
-                        target_time_str = target_dt.strftime("%H:%M")
-                        
-                        cache_key = (uid, item.get('region'), item.get('route_name'),
-                                     item.get('board_stop'), item.get('arrive_stop'), current_date_str)
-                        attempts, last_attempt = attempt_cache.get(cache_key, (0, float('-inf')))
-                        if (0 <= (now - target_dt).total_seconds() < 120
-                                and cache_key not in sent_cache and attempts < 2
-                                and time.monotonic() - last_attempt >= 30):
-                            if access_token or refresh_token:
-                                b_lat = float(item.get('board_lat', 37.3947))
-                                b_lon = float(item.get('board_lon', 127.1111))
-                                a_lat = float(item.get('arrive_lat', 37.3947))
-                                a_lon = float(item.get('arrive_lon', 127.1111))
-                                b_name = item.get('board_stop')
-                                a_name = item.get('arrive_stop')
-                                t_type = item.get('trip_type', '출근길')
-                                r_name = item.get('route_name')
-                                
-                                wb = weather_api.get_weather_forecast_by_coords(b_lat, b_lon, stop_name=b_name, trip_type=t_type, target_datetime=boarding_dt, location="boarding")
-                                wa = weather_api.get_weather_forecast_by_coords(a_lat, a_lon, stop_name=a_name, trip_type=t_type, target_datetime=boarding_dt, location="destination")
-                                
-                                integrated_ai_text = get_integrated_ai_message(wb, wa, b_name, a_name, t_type)
-                                is_l = "퇴근" in str(r_name)
-                                arrive_time_str = "" if is_l else (f" ({item.get('arrive_time')})" if item.get('arrive_time') and item.get('arrive_time') != '-' else "")
-                                
-                                desc = (
-                                    f"🚍 [셔틀 출발 {notify_min}분 전 알림]\n\n"
-                                    f"노선: {r_name} ({t_type})\n\n"
-                                    f"🟢 [탑승] {b_name} ({item.get('board_time')})\n"
-                                    f"• 기온: {wb['temperature']} | 상태: {wb['sky_status']}\n\n"
-                                    f"🔴 [하차] {a_name}{arrive_time_str}\n"
-                                    f"• 기온: {wa['temperature']} | 상태: {wa['sky_status']}\n\n"
-                                    f"🤖 **[AI 코멘트]**\n{integrated_ai_text}"
-                                )
-                                notify_once(sent_cache, attempt_cache, cache_key,
-                                    lambda: send_user_memo(uid, f"[{r_name}] 탑승·하차 날씨 알림", desc, scheduled=True))
-                    except Exception as ex:
-                        print(f"Notification error: {ex}")
-        except Exception as e:
-            print(f"Background worker loop error: {e}")
-        time.sleep(30)
+            with st.spinner(f"Gemini AI가 {label} 노선 문서를 분석 중입니다..."):
+                parsed = ppt_parser.parse_shuttle_document(uploaded)
+                stage = "coordinate_prepare"
+                bar = st.progress(0)
+                txt = st.empty()
+                logger.info("Route geocoding started region=%s", region)
+                rows = weather_api.prepare_routes_with_sequential_geocoding(
+                    parsed, target_region=region,
+                    existing_rows=existing_rows,
+                    progress_callback=lambda c, t, s: (
+                        bar.progress(c / t), txt.text(f"지오코딩 중... ({c}/{t}): {s}")
+                    ),
+                )
+                stage = "reconcile_preview"
+                logger.info("Route reconcile preview started region=%s", region)
+                preview = preview_region_reconcile(region, rows)
+            st.session_state[pending_key] = {"rows": rows, "preview": preview}
+        except RouteRepositoryError as exc:
+            st.session_state.pop(pending_key, None)
+            st.error(str(exc))
+        except PdfCanonicalError as exc:
+            logger.exception(
+                "[ROUTE_IMPORT_ERROR] stage=%s region=%s type=%s message=%s",
+                stage, region, type(exc).__name__, str(exc),
+            )
+            st.session_state.pop(pending_key, None)
+            st.error("노선 문서를 분석하지 못했습니다. 파일과 API 연결 상태를 확인해 주세요.")
+        except weather_api.GeocodingError:
+            st.session_state.pop(pending_key, None)
+            st.error("정류장 좌표를 확인하지 못했습니다. 잠시 후 다시 시도해 주세요.")
+        except Exception as exc:
+            logger.warning(
+                "[ROUTE_IMPORT_ERROR] stage=%s region=%s type=%s",
+                stage, region, type(exc).__name__,
+            )
+            st.session_state.pop(pending_key, None)
+            st.error("노선 문서를 분석하지 못했습니다. 파일과 API 연결 상태를 확인해 주세요.")
+
+    pending = st.session_state.get(pending_key)
+    if pending:
+        st.markdown("**Aiven 반영 예정 변경사항**")
+        decisions = render_reconcile_preview(pending["preview"], region=region)
+        candidates = pending["preview"].get("change_candidates", [])
+        unresolved = len(decisions) != len(candidates)
+        if unresolved:
+            st.info("모든 변경 후보에 대해 적용 또는 기존 값 유지를 선택해 주세요.")
+        if st.button(
+            f"{label} 데이터 Aiven에 저장", type="primary",
+            key=f"save_route_import_{region}",
+            disabled=bool(pending["preview"].get("conflicts")) or unresolved,
+        ):
+            try:
+                reconcile_region_routes(
+                    region, pending["rows"],
+                    expected_snapshot=pending["preview"]["snapshot"],
+                    change_decisions=decisions,
+                )
+                st.session_state.pop(pending_key, None)
+                st.session_state[success_key] = True
+                st.rerun()
+            except (RouteConflictError, StaleRouteSnapshotError) as exc:
+                st.error(str(exc))
+            except RouteRepositoryError as exc:
+                st.error(str(exc))
+
+def send_worker_kakao(target, title, description):
+    """Deliver through Kakao only when the resolved channel is Kakao."""
+    try:
+        access_token, refresh_token = load_kakao_credentials(target.user_id)
+        if not access_token and not refresh_token:
+            return False
+        status, data = deliver_message(
+            access_token, refresh_token,
+            lambda token: send_kakao_memo(token, title, description),
+            refresh_kakao_token,
+            lambda new_access, new_refresh: save_kakao_credentials(
+                target.user_id, new_access, new_refresh or refresh_token
+            ),
+            retry_transient=True,
+        )
+        return message_succeeded(status, data)
+    except NotificationRepositoryError:
+        return False
+
+
+def worker_holiday_checker(service_date):
+    """Existing failure policy: an unavailable holiday API returns no holidays."""
+    return service_date.isoformat() in get_kr_holidays(service_date.year)
 
 @st.cache_resource
 def start_background_scheduler():
-    t = threading.Thread(target=notification_background_worker, daemon=True)
-    t.start()
-    return True
+    started = start_notification_worker(
+        config=WEB_PUSH_CONFIG,
+        holiday_checker=worker_holiday_checker,
+        kakao_sender=send_worker_kakao,
+    )
+    if not started:
+        logger.info("Notification worker disabled or already running")
+    return started
 
 start_background_scheduler()
 
@@ -312,6 +414,7 @@ if ("code" in query_params or "error" in query_params) and st.session_state["use
                             "access_token": access_token, "refresh_token": refresh_token}
                         st.session_state["is_admin"] = kakao_id in [5070327065]
                         st.session_state["preview_user"] = False
+                        invalidate_user_screen_data(st.session_state)
                         st.session_state.pop("login_error", None)
                 else:
                     st.session_state["login_error"] = "카카오 사용자 정보를 가져오지 못했습니다. 잠시 후 다시 로그인해 주세요."
@@ -319,10 +422,18 @@ if ("code" in query_params or "error" in query_params) and st.session_state["use
                 st.session_state["login_error"] = "카카오 로그인에 연결하지 못했습니다. 인터넷 연결을 확인하고 다시 로그인해 주세요."
     st.rerun()
 
+# Load the route source of truth once per Streamlit execution.
+route_load_error = None
+try:
+    db_data = load_routes_for_ui()
+except RouteRepositoryError as exc:
+    db_data = []
+    route_load_error = str(exc)
+
 # Restore only existing choices, before widgets are constructed.
 restored = st.session_state.pop("restored_selection", None)
 if restored:
-    rows = weather_api.load_routes_from_db()
+    rows = db_data
     rows = [r for r in rows if r.get("region", "gyeonggi") == restored.get("user_reg")]
     if not rows:
         restored = {}
@@ -377,6 +488,7 @@ with st.sidebar:
                 st.info("즐겨찾기와 메시지 시연에는 카카오 로그인이 필요합니다.")
                 login_link = st.empty()
         if st.button("로그아웃", width='stretch'):
+            invalidate_user_screen_data(st.session_state)
             st.session_state["user_info"] = None
             st.session_state["is_admin"] = False
             st.session_state["preview_user"] = False
@@ -385,11 +497,20 @@ with st.sidebar:
 
 st.title("🚌 AI 셔틀버스 날씨 알림 (탑승·하차 통합 안내)")
 
-db_data = weather_api.load_routes_from_db()
+if route_load_error:
+    st.error(route_load_error)
 sorted_db_data = sorted(
     db_data,
     key=lambda x: x.get('region', 'gyeonggi')
 )
+admin_snapshot = {"rows": [], "identity_map": {}, "snapshots": {}}
+admin_route_error = None
+if st.session_state["is_admin"] and not st.session_state["preview_user"]:
+    try:
+        admin_snapshot = load_admin_route_snapshot()
+    except RouteRepositoryError as exc:
+        admin_route_error = str(exc)
+admin_db_data = admin_snapshot["rows"]
 
 if st.session_state["is_admin"] and not st.session_state["preview_user"]:
     tab1, tab2 = st.tabs(["👑 [어드민] 노선 관리 및 그리드 편집", "🌤️ 셔틀버스 탑승·하차 통합 날씨 및 즐겨찾기"], default="🌤️ 셔틀버스 탑승·하차 통합 날씨 및 즐겨찾기")
@@ -399,59 +520,66 @@ else:
 
 if tab1 is None:
     from weather_advice_preview import reset_preview
+    from notification_history_ui import reset_notification_history
     reset_preview()
+    reset_notification_history()
 
 if tab1 is not None:
     with tab1:
         st.header("📋 지역별 셔틀버스 노선 문서 업로드 및 관리")
+        if admin_route_error:
+            st.error(admin_route_error)
+        st.subheader("🔔 전역 알림 채널 정책")
+        try:
+            global_channel_policy = get_global_notification_policy()
+            admin_actor_id = (
+                st.session_state["user_info"].get("id")
+                if st.session_state["user_info"] else None
+            )
+            global_policy_options = ["AUTO", "PUSH", "KAKAO"]
+            selected_global_policy = st.selectbox(
+                "전체 서비스 알림 채널",
+                global_policy_options,
+                index=global_policy_options.index(global_channel_policy),
+                format_func=lambda value: {
+                    "AUTO": "AUTO - 사용자 설정 사용",
+                    "PUSH": "PUSH - 전체 Web Push 강제",
+                    "KAKAO": "KAKAO - 전체 카카오톡 강제",
+                }[value],
+                key="admin_global_notification_policy",
+            )
+            if admin_actor_id is None:
+                st.caption("전역 정책 변경에는 DB에 등록된 카카오 관리자 로그인이 필요합니다.")
+            if st.button(
+                "💾 전역 알림 정책 저장", key="save_global_notification_policy",
+                disabled=admin_actor_id is None,
+            ):
+                update_global_notification_policy(
+                    admin_actor_id, selected_global_policy
+                )
+                st.success("전역 알림 정책이 저장되었습니다.")
+                st.rerun()
+        except UserSettingsError as exc:
+            st.error(str(exc))
+        st.divider()
         up_tab_gy, up_tab_se = st.tabs(["🟢 경기 지역 업로드", "🔵 서울 지역 업로드"])
         
         with up_tab_gy:
-            file_gy = st.file_uploader("경기 셔틀 노선 파일 선택 (PDF, PPTX)", type=["pdf", "pptx"], key="up_gy")
-            if file_gy and st.button("경기 데이터 일괄 반영", type="primary"):
-                try:
-                    with st.spinner("Gemini AI가 경기 노선 문서를 분석 중입니다..."):
-                        parsed = ppt_parser.parse_shuttle_document(file_gy)
-                        bar = st.progress(0)
-                        txt = st.empty()
-                        weather_api.save_routes_with_sequential_geocoding(
-                            parsed, target_region="gyeonggi", 
-                            progress_callback=lambda c, t, s: (bar.progress(c/t), txt.text(f"지오코딩 중... ({c}/{t}): {s}"))
-                        )
-                    st.success("경기 노선 반영 완료!")
-                    st.rerun()
-                except Exception as e:
-                    logger.exception("Route import failed")
-                    st.error("노선 문서를 처리하지 못했습니다. 파일과 API 연결 상태를 확인해 주세요.")
+            render_route_import("gyeonggi", "경기", "up_gy", admin_db_data)
 
         with up_tab_se:
-            file_se = st.file_uploader("서울 셔틀 노선 파일 선택 (PDF, PPTX)", type=["pdf", "pptx"], key="up_se")
-            if file_se and st.button("서울 데이터 일괄 반영", type="primary"):
-                try:
-                    with st.spinner("Gemini AI가 서울 노선 문서를 분석 중입니다..."):
-                        parsed = ppt_parser.parse_shuttle_document(file_se)
-                        bar = st.progress(0)
-                        txt = st.empty()
-                        weather_api.save_routes_with_sequential_geocoding(
-                            parsed, target_region="seoul", 
-                            progress_callback=lambda c, t, s: (bar.progress(c/t), txt.text(f"지오코딩 중... ({c}/{t}): {s}"))
-                        )
-                    st.success("서울 노선 반영 완료!")
-                    st.rerun()
-                except Exception as e:
-                    logger.exception("Route import failed")
-                    st.error("노선 문서를 처리하지 못했습니다. 파일과 API 연결 상태를 확인해 주세요.")
+            render_route_import("seoul", "서울", "up_se", admin_db_data)
 
         st.divider()
         st.subheader("📍 특정 정류장 좌표 단건 재계산")
-        if sorted_db_data:
+        if admin_db_data:
             c1, c2, c3 = st.columns(3)
             with c1:
-                admin_regions = sorted(list(set(i.get('region', 'gyeonggi') for i in sorted_db_data)))
+                admin_regions = sorted(list(set(i.get('region', 'gyeonggi') for i in admin_db_data)))
                 reg_map_admin = {"gyeonggi": "경기", "seoul": "서울"}
                 sel_admin_region = st.selectbox("지역 선택", admin_regions, format_func=lambda x: reg_map_admin.get(x, x), key="admin_reg")
             
-            reg_filtered_admin = [i for i in sorted_db_data if i.get('region', 'gyeonggi') == sel_admin_region]
+            reg_filtered_admin = [i for i in admin_db_data if i.get('region', 'gyeonggi') == sel_admin_region]
             
             with c2:
                 admin_routes = list(dict.fromkeys(i.get('route_name') for i in reg_filtered_admin if i.get('route_name')))
@@ -462,51 +590,69 @@ if tab1 is not None:
             with c3:
                 admin_stops = [i.get('stop_name') for i in route_filtered_admin]
                 sel_st = st.selectbox("정류장 선택", admin_stops if admin_stops else ["정류장 없음"], key="admin_st")
+            selected_admin_row = next(
+                (row for row in route_filtered_admin if row.get("stop_name") == sel_st), None
+            )
             
             if st.button("🎯 선택 정류장 좌표 재계산 및 갱신", type="primary"):
                 with st.spinner("카카오 지도 API 및 Gemini 격자 변환 처리 중..."):
-                    print(f"[LOG] 단건 좌표 재계산 요청 시작 -> 노선: {sel_rt}, 정류장: {sel_st}")
                     try:
-                        succ, msg = weather_api.update_single_route_coordinate(sel_st, sel_rt)
-                        print(f"[LOG] 단건 좌표 재계산 응답 결과 -> 성공 여부: {succ}, 메시지: {msg}")
-                    except Exception as e:
-                        succ = False
-                        msg = f"예외 발생 (Exception): {str(e)}"
-                        print(f"[LOG ERROR] update_single_route_coordinate 실행 중 예외 발생: {e}")
-                
-                if succ:
-                    st.success(f"✅ 수정 완료: {msg}")
-                    st.toast("정류장 좌표가 성공적으로 재계산 및 수정되었습니다!", icon="🎯")
-                    st.rerun()
-                else:
-                    st.error(f"❌ 수정 실패: {msg}")
-                    with st.expander("🔍 Gemini 호출 및 지오코딩 실패 원인 상세 확인"):
-                        st.markdown(f"- **대상 노선:** `{sel_rt}`")
-                        st.markdown(f"- **대상 정류장:** `{sel_st}`")
-                        st.markdown(f"- **반환된 메시지/에러:** `{msg}`")
-                        st.info("💡 **확인 사항:** `weather_api.py` 내부의 Gemini API 호출 함수에서 API Key 인증 오류, 할당량 초과, 또는 모델명 설정 문제로 인해 예외가 발생하고 기본값(판교)으로 빠지고 있는지 확인이 필요합니다.")                    
+                        if selected_admin_row is None:
+                            raise RouteValidationError("수정할 정류장을 찾을 수 없습니다.")
+                        identity = admin_snapshot["identity_map"].get(
+                            selected_admin_row.get("_identity_key"), {}
+                        )
+                        if not identity:
+                            raise RouteValidationError("정류장 식별정보를 찾을 수 없습니다.")
+                        new_lat, new_lon = weather_api.get_coordinates_by_gemini(sel_st)
+                        if new_lat == 37.3947 and new_lon == 127.1111:
+                            raise RouteValidationError(
+                                "좌표를 확인하지 못해 기본 좌표가 반환되었습니다. 저장을 취소했습니다."
+                            )
+                        new_nx, new_ny = weather_api.latlon_to_grid(new_lat, new_lon)
+                        update_route_stop_coordinates(
+                            identity["route_stop_id"], latitude=new_lat, longitude=new_lon,
+                            grid_x=new_nx, grid_y=new_ny,
+                            geocode_status="✅ 정상 (단건 재조회)",
+                            expected_version=identity["version"],
+                        )
+                    except RouteRepositoryError as exc:
+                        st.error(str(exc))
+                    except Exception as exc:
+                        logger.warning("Route coordinate refresh failed type=%s", type(exc).__name__)
+                        st.error("정류장 좌표를 갱신하지 못했습니다.")
+                    else:
+                        st.toast("정류장 좌표가 성공적으로 갱신되었습니다!", icon="🎯")
+                        st.rerun()
 
         st.divider()
         st.subheader("📝 노선 및 정류장 데이터 직접 편집 그리드")
-        if sorted_db_data:
-            df_routes = pd.DataFrame(sorted_db_data)
-            edited_df = st.data_editor(df_routes, num_rows="dynamic", width='stretch', key="route_grid_editor", height=400)
+        if admin_db_data:
+            df_routes = pd.DataFrame(admin_db_data)
+            edited_df = st.data_editor(
+                df_routes, num_rows="dynamic", width='stretch',
+                key="route_grid_editor", height=400,
+                column_config={"_identity_key": None, "_stop_order": None},
+            )
             if st.button("💾 그리드 변경사항 저장", type="primary", width='stretch'):
                 try:
                     updated_records = edited_df.to_dict(orient="records")
-                    if hasattr(weather_api, 'save_all_routes'):
-                        weather_api.save_all_routes(updated_records)
-                    else:
-                        db_file = getattr(weather_api, 'DB_FILE', 'routes_db.json')
-                        with open(db_file, "w", encoding="utf-8") as f:
-                            json.dump(updated_records, f, ensure_ascii=False, indent=4)
-                    st.success("✅ 변경사항이 저장되었습니다!")
+                    reconcile_admin_route_edits(
+                        updated_records,
+                        identity_map=admin_snapshot["identity_map"],
+                        expected_snapshots=admin_snapshot["snapshots"],
+                    )
+                    st.toast("노선 변경사항이 Aiven에 저장되었습니다.", icon="✅")
                     st.rerun()
-                except Exception as e:
-                    st.error(f"❌ 저장 오류: {e}")
+                except RouteRepositoryError as exc:
+                    st.error(str(exc))
 
         from weather_advice_preview import render_admin_preview
         render_admin_preview(st.session_state['is_admin'], st.session_state['preview_user'])
+        from notification_history_ui import render_admin_notification_history
+        render_admin_notification_history(
+            st.session_state['is_admin'], st.session_state['preview_user']
+        )
 
 main_tab_target = tab2 if tab1 is not None else tab2
 with main_tab_target:
@@ -531,7 +677,7 @@ with main_tab_target:
         
         is_leave = "퇴근" in str(sel_route)
         trip_type = "퇴근길" if is_leave else "출근길"
-        boarding_options, arrival_options = route_stop_options(stops, is_leave)
+        boarding_options, arrival_options = route_stop_options(route_stops, is_leave)
 
         # Reset before creating stop widgets, even when routes share stop names.
         # On the first render, preserve any selections restored by OAuth.
@@ -577,13 +723,13 @@ with main_tab_target:
         else:
             PANGYO_2ND_LAT = 37.412605
             PANGYO_2ND_LON = 127.095703
-            arrive_row = {
+            arrive_row = next((i for i in route_stops if i.get('is_default_dropoff')), None) or {
                 'stop_name': "판교 제2테크노밸리",
                 'lat': PANGYO_2ND_LAT,
                 'lon': PANGYO_2ND_LON
             }
-            arrive_lat = PANGYO_2ND_LAT
-            arrive_lon = PANGYO_2ND_LON
+            arrive_lat = float(arrive_row.get('lat', PANGYO_2ND_LAT))
+            arrive_lon = float(arrive_row.get('lon', PANGYO_2ND_LON))
         
         board_lat = float(board_row.get('lat', 37.3947))
         board_lon = float(board_row.get('lon', 127.1111))
@@ -599,10 +745,23 @@ with main_tab_target:
             st.session_state['w_board'] = w_board
             st.session_state['w_arrive'] = w_arrive
             st.session_state['integrated_stop_key'] = weather_selection_key
+            st.session_state['integrated_comment'] = get_integrated_ai_message(
+                w_board, w_arrive, sel_board_stop, sel_arrive_stop, trip_type
+            )
+            st.session_state['integrated_comment_key'] = weather_selection_key
         
-        user_id = st.session_state["user_info"]["id"] if st.session_state["user_info"] else "guest"
-        user_data_obj = get_user_data(user_id)
-        user_settings = user_data_obj.get("settings", [])
+        user_id = st.session_state["user_info"]["id"] if st.session_state["user_info"] else None
+        user_settings = []
+        notification_settings = None
+        user_settings_error = None
+        if user_id is not None:
+            try:
+                dashboard_data = get_user_screen_data(st.session_state, user_id)
+                notification_settings = dashboard_data["notification_settings"]
+                user_settings = dashboard_data["favorites"]
+            except (UserSettingsError, ValueError) as exc:
+                user_settings_error = str(exc)
+                st.error(user_settings_error)
         
         if 'w_board' in st.session_state and 'w_arrive' in st.session_state and st.session_state.get('integrated_stop_key') == weather_selection_key:
             wb = st.session_state['w_board']
@@ -632,7 +791,14 @@ with main_tab_target:
                     m4.metric("하늘상태", wa["sky_status"])
             
             st.markdown("")
-            integrated_comment = get_integrated_ai_message(wb, wa, sel_board_stop, sel_arrive_stop, trip_type)
+            if st.session_state.get('integrated_comment_key') == weather_selection_key:
+                integrated_comment = st.session_state.get('integrated_comment')
+            else:
+                integrated_comment = get_integrated_ai_message(
+                    wb, wa, sel_board_stop, sel_arrive_stop, trip_type
+                )
+                st.session_state['integrated_comment'] = integrated_comment
+                st.session_state['integrated_comment_key'] = weather_selection_key
             boarding_label = f" · {boarding_target:%m/%d %H:%M} 탑승 예정" if boarding_target else ""
             st.info(f"🤖 **통합 AI 코멘트{boarding_label}**\n\n{integrated_comment}")
 
@@ -640,7 +806,9 @@ with main_tab_target:
             action_favorite, action_message = st.columns(2)
             with action_favorite:
                 if st.session_state["user_info"]:
-                    if st.button("⭐ 통합 즐겨찾기 추가", width='stretch'):
+                    can_change_db_settings = not st.session_state["preview_user"] and not user_settings_error
+                    if st.button("⭐ 통합 즐겨찾기 추가", width='stretch',
+                                 disabled=not can_change_db_settings):
                         new_item = {
                             "region": sel_region,
                             "route_name": sel_route,
@@ -653,17 +821,18 @@ with main_tab_target:
                             "board_lon": board_lon,
                             "arrive_lat": arrive_lat,
                             "arrive_lon": arrive_lon,
-                            "notify_enabled": False,
-                            "notify_min": 10
                         }
-                        keys = [f"{i.get('route_name')}_{i.get('board_stop')}_{i.get('arrive_stop')}" for i in user_settings]
-                        if f"{sel_route}_{sel_board_stop}_{sel_arrive_stop}" not in keys:
-                            user_settings.append(new_item)
-                            save_user_data(user_id, settings_list=user_settings)
+                        try:
+                            create_favorite(user_id, new_item)
+                            invalidate_user_screen_data(st.session_state, user_id)
                             st.success("통합 즐겨찾기에 추가되었습니다!")
                             st.rerun()
-                        else:
-                            st.warning("이미 등록된 구간입니다.")
+                        except DuplicateFavoriteError as exc:
+                            st.warning(str(exc))
+                        except UserSettingsError as exc:
+                            st.error(str(exc))
+                    if st.session_state["preview_user"]:
+                        st.caption("일반 사용자 미리보기에서는 즐겨찾기를 변경할 수 없습니다.")
                 else:
                     st.button("⭐ 즐겨찾기 (로그인필요)", width='stretch', disabled=True)
 
@@ -676,7 +845,13 @@ with main_tab_target:
                             wb = weather_api.get_weather_forecast_by_coords(board_lat, board_lon, stop_name=sel_board_stop, trip_type=trip_type, target_datetime=boarding_target, location="boarding")
                             wa = weather_api.get_weather_forecast_by_coords(arrive_lat, arrive_lon, stop_name=sel_arrive_stop, trip_type=trip_type, target_datetime=boarding_target, location="destination")
 
-                        integrated_ai_text = get_integrated_ai_message(wb, wa, sel_board_stop, sel_arrive_stop, trip_type)
+                        if (st.session_state.get('integrated_comment_key') == weather_selection_key
+                                and st.session_state.get('integrated_comment')):
+                            integrated_ai_text = st.session_state['integrated_comment']
+                        else:
+                            integrated_ai_text = get_integrated_ai_message(
+                                wb, wa, sel_board_stop, sel_arrive_stop, trip_type
+                            )
                         arrive_time_str = "" if is_leave else (f" ({arrive_row.get('arrival_time', '-')})" if arrive_row.get('arrival_time') else "")
 
                         desc = (
@@ -698,11 +873,31 @@ with main_tab_target:
 
         st.divider()
         if st.session_state["user_info"]:
-            with st.expander("⚙️ 자동 알림 공통 조건 설정 (발송 요일 및 공휴일)", expanded=True):
-                notif_config = user_data_obj.get("notification_config", {"active_days": ["월", "화", "수", "목", "금"], "exclude_holidays": True})
-                current_active_days = notif_config.get("active_days", ["월", "화", "수", "목", "금"])
-                current_exclude_holidays = notif_config.get("exclude_holidays", True)
-                
+            with st.expander("⚙️ 자동 알림 공통 조건 설정", expanded=True):
+                current_active_days = []
+                current_exclude_holidays = True
+                selected_channel = "KAKAO"
+                settings_widget_owner = "unavailable"
+                if notification_settings is None:
+                    st.warning("알림 설정을 불러오지 못해 변경할 수 없습니다.")
+                else:
+                    settings_widget_owner = notification_settings["user_id"]
+                    current_active_days = notification_settings["active_days"]
+                    current_exclude_holidays = notification_settings["exclude_holidays"]
+                    current_channel = notification_settings["delivery_channel"]
+                    st.markdown("**알림 받는 방법**")
+                    selected_channel = st.radio(
+                        "알림 채널",
+                        ["PUSH", "KAKAO"],
+                        index=0 if current_channel == "PUSH" else 1,
+                        format_func=lambda value: "Web Push" if value == "PUSH" else "카카오톡",
+                        horizontal=True,
+                        key=f"user_delivery_channel_{notification_settings['user_id']}",
+                        disabled=st.session_state["preview_user"],
+                    )
+                    if selected_channel == "PUSH" and notification_settings["active_push_devices"] == 0:
+                        st.info("Web Push를 사용하려면 알림을 받을 기기를 먼저 등록해 주세요.")
+
                 col_cfg1, col_cfg2 = st.columns([3, 2])
                 with col_cfg1:
                     st.markdown("**알림 발송 요일 선택**")
@@ -712,30 +907,58 @@ with main_tab_target:
                         day_cols = st.columns(7)
                         for idx, day in enumerate(all_days):
                             with day_cols[idx]:
-                                if st.checkbox(day, value=(day in current_active_days), key=f"day_chk_{day}"):
-                                    selected_days.append(day)
+                                if st.checkbox(
+                                    day, value=(idx in current_active_days),
+                                    key=f"day_chk_{settings_widget_owner}_{day}",
+                                    disabled=st.session_state["preview_user"] or notification_settings is None,
+                                ):
+                                    selected_days.append(idx)
                 with col_cfg2:
                     st.markdown("**휴일 설정**")
-                    exclude_hols = st.checkbox("대한민국 공휴일 자동 제외", value=current_exclude_holidays, key="exclude_hols_chk")
+                    exclude_hols = st.checkbox(
+                        "대한민국 공휴일 자동 제외",
+                        value=current_exclude_holidays if notification_settings else True,
+                        key=f"exclude_hols_chk_{settings_widget_owner}",
+                        disabled=st.session_state["preview_user"] or notification_settings is None,
+                    )
                 
-                if st.button("💾 공통 알림 조건 저장", type="primary", width='stretch'):
-                    new_config = {
-                        "active_days": selected_days,
-                        "exclude_holidays": exclude_hols
-                    }
-                    save_user_data(user_id, notification_config=new_config)
-                    st.success("알림 조건이 저장되었습니다!")
-                    st.rerun()
+                if st.button(
+                    "💾 공통 알림 조건 저장", type="primary", width='stretch',
+                    disabled=st.session_state["preview_user"] or notification_settings is None,
+                ):
+                    try:
+                        update_notification_settings(
+                            user_id, active_days=selected_days,
+                            exclude_holidays=exclude_hols,
+                            delivery_channel=selected_channel,
+                        )
+                        invalidate_user_screen_data(st.session_state, user_id)
+                        st.success("알림 조건이 저장되었습니다!")
+                        st.rerun()
+                    except UserSettingsError as exc:
+                        st.error(str(exc))
 
             st.markdown("")
-        render_web_push_poc(WEB_PUSH_CONFIG)
+        if st.session_state["user_info"] and not st.session_state["preview_user"]:
+            render_web_push_poc(
+                WEB_PUSH_CONFIG,
+                kakao_user_id=st.session_state["user_info"]["id"],
+                on_data_changed=lambda: invalidate_user_screen_data(
+                    st.session_state, st.session_state["user_info"]["id"]
+                ),
+            )
+        elif st.session_state["preview_user"]:
+            st.info("일반 사용자 미리보기에서는 기기 알림을 등록할 수 없습니다.")
+        else:
+            render_web_push_poc(WEB_PUSH_CONFIG)
 
         st.markdown("")
         st.subheader("⭐ 내 통합 즐겨찾기 및 알림 설정 목록")
         if st.session_state["user_info"]:
             if user_settings:
-                for idx, item in enumerate(user_settings):
-                    with st.container(border=True, key=f"mobile_favorite_{idx}"):
+                for item in user_settings:
+                    favorite_id = item["favorite_id"]
+                    with st.container(border=True, key=f"mobile_favorite_{favorite_id}"):
                         cols_fav = st.columns([4, 2, 1])
                         with cols_fav[0]:
                             is_item_leave = "퇴근" in str(item.get('trip_type', ''))
@@ -749,26 +972,51 @@ with main_tab_target:
                             notify_enabled = item.get("notify_enabled", False)
                             notify_min = item.get("notify_min", 10)
                             
-                            new_notify_enabled = st.checkbox("🔔 알림 받기", value=notify_enabled, key=f"notif_chk_{idx}")
+                            new_notify_enabled = st.checkbox(
+                                "🔔 알림 받기", value=notify_enabled,
+                                key=f"notif_chk_{favorite_id}",
+                                disabled=st.session_state["preview_user"],
+                            )
                             
                             options_min = [10, 20, 30, 40, 50, 60]
                             current_idx = options_min.index(notify_min) if notify_min in options_min else 0
-                            new_notify_min = st.selectbox("알림 시점", options_min, index=current_idx, format_func=lambda x: f"출발 {x}분 전", key=f"notif_min_{idx}")
+                            new_notify_min = st.selectbox(
+                                "알림 시점", options_min, index=current_idx,
+                                format_func=lambda x: f"출발 {x}분 전",
+                                key=f"notif_min_{favorite_id}",
+                                disabled=st.session_state["preview_user"],
+                            )
                             
-                            if st.button("💾 설정 저장", key=f"save_notif_{idx}", width='stretch'):
-                                item["notify_enabled"] = new_notify_enabled
-                                item["notify_min"] = new_notify_min
-                                save_user_data(user_id, settings_list=user_settings)
-                                st.success("알림 설정이 저장되었습니다!")
-                                st.rerun()
+                            if st.button(
+                                "💾 설정 저장", key=f"save_notif_{favorite_id}", width='stretch',
+                                disabled=st.session_state["preview_user"],
+                            ):
+                                try:
+                                    if not update_favorite_notification(
+                                        user_id, favorite_id, enabled=new_notify_enabled,
+                                        lead_minutes=new_notify_min,
+                                    ):
+                                        raise UserSettingsError("즐겨찾기 알림 설정을 찾을 수 없습니다.")
+                                    invalidate_user_screen_data(st.session_state, user_id)
+                                    st.success("알림 설정이 저장되었습니다!")
+                                    st.rerun()
+                                except UserSettingsError as exc:
+                                    st.error(str(exc))
                         with cols_fav[2]:
                             st.write("")
-                            if st.button("🗑️ 삭제", key=f"del_fav_{idx}", width='stretch'):
-                                user_settings.pop(idx)
-                                save_user_data(user_id, settings_list=user_settings)
-                                st.success("삭제되었습니다.")
-                                st.rerun()
-            else:
+                            if st.button(
+                                "🗑️ 삭제", key=f"del_fav_{favorite_id}", width='stretch',
+                                disabled=st.session_state["preview_user"],
+                            ):
+                                try:
+                                    if not delete_favorite(user_id, favorite_id):
+                                        raise UserSettingsError("삭제할 즐겨찾기를 찾을 수 없습니다.")
+                                    invalidate_user_screen_data(st.session_state, user_id)
+                                    st.success("삭제되었습니다.")
+                                    st.rerun()
+                                except UserSettingsError as exc:
+                                    st.error(str(exc))
+            elif user_settings_error is None:
                 st.info("등록된 통합 즐겨찾기가 없습니다. 자주 이용하는 출퇴근 구간을 추가해 보세요!")
         else:
             st.info("🔒 카카오 로그인 후 나만의 즐겨찾기 및 알림 설정 목록을 확인하실 수 있습니다.")
