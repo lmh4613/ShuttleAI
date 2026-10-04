@@ -5,6 +5,7 @@ from decimal import Decimal
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -445,6 +446,90 @@ def test_new_stop_is_geocoded_and_previewed_as_added(monkeypatch):
     assert plan["counts"]["stops_added"] == 1
     assert any(item["change_type"] == "STOP_ADDED" and
                item["stop_name"] == "신규 정류장" for item in plan["details"])
+
+
+def test_geocoding_without_api_client_never_returns_default_coordinates(monkeypatch):
+    monkeypatch.setattr(weather_api, "GEMINI_API_KEY", None)
+    monkeypatch.setattr(weather_api, "client", None)
+
+    with pytest.raises(weather_api.GeocodingError, match="좌표"):
+        weather_api.get_coordinates_by_gemini("신규 정류장")
+
+
+def test_geocoding_api_failure_never_returns_default_coordinates(monkeypatch):
+    models = SimpleNamespace(generate_content=lambda **_kwargs: (_ for _ in ()).throw(
+        RuntimeError("request failed")
+    ))
+    monkeypatch.setattr(weather_api, "GEMINI_API_KEY", "configured")
+    monkeypatch.setattr(weather_api, "client", SimpleNamespace(models=models))
+
+    with pytest.raises(weather_api.GeocodingError, match="좌표"):
+        weather_api.get_coordinates_by_gemini("신규 정류장")
+
+
+def test_geocoding_invalid_coordinates_never_returns_default_coordinates(monkeypatch):
+    response = SimpleNamespace(text='{"lat": 0, "lon": 0}')
+    models = SimpleNamespace(generate_content=lambda **_kwargs: response)
+    monkeypatch.setattr(weather_api, "GEMINI_API_KEY", "configured")
+    monkeypatch.setattr(weather_api, "client", SimpleNamespace(models=models))
+
+    with pytest.raises(weather_api.GeocodingError, match="좌표"):
+        weather_api.get_coordinates_by_gemini("신규 정류장")
+
+
+def test_same_new_stop_name_on_different_routes_is_geocoded_separately(monkeypatch):
+    coordinates = iter(((37.1, 127.1), (37.2, 127.2)))
+    calls = []
+    monkeypatch.setattr(
+        weather_api, "get_coordinates_by_gemini",
+        lambda name: calls.append(name) or next(coordinates),
+    )
+
+    prepared = weather_api.prepare_routes_with_sequential_geocoding([
+        {"route_name": "(출근) A", "stop_name": "공통 이름", "arrival_time": "07:10"},
+        {"route_name": "(출근) B", "stop_name": "공통 이름", "arrival_time": "07:20"},
+    ])
+
+    assert calls == ["공통 이름", "공통 이름"]
+    assert [(row["lat"], row["lon"]) for row in prepared] == [
+        (37.1, 127.1), (37.2, 127.2),
+    ]
+
+
+def test_same_logical_route_and_normalized_stop_share_geocoding(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        weather_api, "get_coordinates_by_gemini",
+        lambda name: calls.append(name) or (37.1, 127.1),
+    )
+
+    prepared = weather_api.prepare_routes_with_sequential_geocoding([
+        {"route_name": "(출근) A", "stop_name": "정류장 (동쪽)", "arrival_time": "07:10"},
+        {"route_name": "(출근)A", "stop_name": "정류장(동쪽)", "arrival_time": "07:20"},
+    ])
+
+    assert calls == ["정류장 (동쪽)"]
+    assert {(row["lat"], row["lon"]) for row in prepared} == {(37.1, 127.1)}
+
+
+def test_any_geocoding_failure_aborts_candidate_generation(monkeypatch):
+    calls = []
+
+    def fail_second(stop_name):
+        calls.append(stop_name)
+        if stop_name == "실패 정류장":
+            raise weather_api.GeocodingError("정류장 좌표를 확인할 수 없습니다.")
+        return 37.1, 127.1
+
+    monkeypatch.setattr(weather_api, "get_coordinates_by_gemini", fail_second)
+
+    with pytest.raises(weather_api.GeocodingError):
+        weather_api.prepare_routes_with_sequential_geocoding([
+            {"route_name": "(출근) A", "stop_name": "성공 정류장", "arrival_time": "07:10"},
+            {"route_name": "(출근) A", "stop_name": "실패 정류장", "arrival_time": "07:20"},
+        ])
+
+    assert calls == ["성공 정류장", "실패 정류장"]
 
 
 def test_unambiguous_spacing_variant_reuses_coordinates_and_preserves_parser_name(monkeypatch):

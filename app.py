@@ -294,6 +294,9 @@ def render_route_import(region, label, uploader_key, existing_rows):
             )
             st.session_state.pop(pending_key, None)
             st.error("노선 문서를 분석하지 못했습니다. 파일과 API 연결 상태를 확인해 주세요.")
+        except weather_api.GeocodingError:
+            st.session_state.pop(pending_key, None)
+            st.error("정류장 좌표를 확인하지 못했습니다. 잠시 후 다시 시도해 주세요.")
         except Exception as exc:
             logger.warning(
                 "[ROUTE_IMPORT_ERROR] stage=%s region=%s type=%s",
