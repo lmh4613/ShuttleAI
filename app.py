@@ -13,8 +13,14 @@ import weather_api
 import ppt_parser
 from pdf_route_canonical import PdfCanonicalError
 from mobile_ui import inject_mobile_styles
-from web_push import load_web_push_config
-from web_push_ui import render_web_push_poc
+from notification_message import format_weather_notification
+from push_subscription_store import (
+    OWNERSHIP_CURRENT,
+    PushSubscriptionError,
+    mark_subscription_expired,
+)
+from web_push import load_web_push_config, send_web_push
+from web_push_ui import can_send_weather_push, render_web_push_poc
 from user_screen_cache import get_user_screen_data, invalidate_user_screen_data
 from notification_repository import (
     NotificationRepositoryError,
@@ -447,13 +453,22 @@ if restored:
         st.session_state.pop(key, None)
     st.session_state.update(restored)
 
-login_link = None
+def logout_user_session():
+    invalidate_user_screen_data(st.session_state)
+    st.session_state["user_info"] = None
+    st.session_state["is_admin"] = False
+    st.session_state["preview_user"] = False
+    st.query_params.clear()
+    st.rerun()
+
+
+login_links = []
 # 사이드바: 로그인 및 관리자 인증
 with st.sidebar:
     st.subheader("🔐 사용자 인증")
     if st.session_state["user_info"] is None and not st.session_state["is_admin"]:
         st.info("💡 카카오 로그인을 통해 즐겨찾기 및 알림 기능을 이용하세요.")
-        login_link = st.empty()
+        login_links.append(st.empty())
         if st.session_state.get("login_error"):
             st.error(st.session_state["login_error"])
         st.divider()
@@ -486,16 +501,20 @@ with st.sidebar:
                     st.rerun()
             if st.session_state["user_info"] is None:
                 st.info("즐겨찾기와 메시지 시연에는 카카오 로그인이 필요합니다.")
-                login_link = st.empty()
-        if st.button("로그아웃", width='stretch'):
-            invalidate_user_screen_data(st.session_state)
-            st.session_state["user_info"] = None
-            st.session_state["is_admin"] = False
-            st.session_state["preview_user"] = False
-            st.query_params.clear()
-            st.rerun()
+                login_links.append(st.empty())
+        if st.button("로그아웃", key="sidebar_logout", width='stretch'):
+            logout_user_session()
 
 st.title("🚌 AI 셔틀버스 날씨 알림 (탑승·하차 통합 안내)")
+
+with st.container(key="mobile_auth"):
+    if st.session_state["user_info"] is None:
+        st.caption("카카오 로그인 후 즐겨찾기와 알림 기능을 이용할 수 있습니다.")
+        login_links.append(st.empty())
+    else:
+        st.caption(f"👤 {st.session_state['user_info']['nickname']}님 로그인 중")
+        if st.button("로그아웃", key="mobile_logout", width="stretch"):
+            logout_user_session()
 
 if route_load_error:
     st.error(route_load_error)
@@ -802,8 +821,29 @@ with main_tab_target:
             boarding_label = f" · {boarding_target:%m/%d %H:%M} 탑승 예정" if boarding_target else ""
             st.info(f"🤖 **통합 AI 코멘트{boarding_label}**\n\n{integrated_comment}")
 
+        result_matches_selection = bool(
+            st.session_state.get('integrated_stop_key') == weather_selection_key
+            and st.session_state.get('integrated_comment_key') == weather_selection_key
+            and st.session_state.get('w_board')
+            and st.session_state.get('w_arrive')
+            and st.session_state.get('integrated_comment')
+        )
+        weather_message = None
+        if result_matches_selection:
+            weather_message = format_weather_notification(
+                route_name=sel_route,
+                trip_type=trip_type,
+                boarding_stop=sel_board_stop,
+                boarding_time=board_row.get('arrival_time'),
+                boarding_weather=st.session_state['w_board'],
+                destination_stop=sel_arrive_stop,
+                destination_time=(None if is_leave else arrive_row.get('arrival_time')),
+                destination_weather=st.session_state['w_arrive'],
+                comment=st.session_state['integrated_comment'],
+            )
+
         with st.container(key="mobile_favorite_actions"):
-            action_favorite, action_message = st.columns(2)
+            action_favorite, action_kakao, action_push = st.columns(3)
             with action_favorite:
                 if st.session_state["user_info"]:
                     can_change_db_settings = not st.session_state["preview_user"] and not user_settings_error
@@ -836,40 +876,61 @@ with main_tab_target:
                 else:
                     st.button("⭐ 즐겨찾기 (로그인필요)", width='stretch', disabled=True)
 
-            with action_message:
-                if st.session_state["user_info"]:
-                    if st.button("💬 카카오톡 통합 날씨 전송", width='stretch'):
-                        wb = st.session_state.get('w_board')
-                        wa = st.session_state.get('w_arrive')
-                        if not wb or st.session_state.get('integrated_stop_key') != weather_selection_key:
-                            wb = weather_api.get_weather_forecast_by_coords(board_lat, board_lon, stop_name=sel_board_stop, trip_type=trip_type, target_datetime=boarding_target, location="boarding")
-                            wa = weather_api.get_weather_forecast_by_coords(arrive_lat, arrive_lon, stop_name=sel_arrive_stop, trip_type=trip_type, target_datetime=boarding_target, location="destination")
+            with action_kakao:
+                kakao_enabled = bool(st.session_state["user_info"] and weather_message)
+                if st.button(
+                    "💬 카카오톡으로 보내기",
+                    width='stretch',
+                    disabled=not kakao_enabled,
+                ):
+                    code, res = send_user_memo(
+                        user_id, weather_message.title, weather_message.body
+                    )
+                    if message_succeeded(code, res):
+                        st.success("카카오톡 통합 전송 완료!")
+                        st.toast("카카오톡 나에게 톡메시지가 전송되었습니다.", icon="💬")
+                    else:
+                        st.error("카카오톡 전송에 실패했습니다. 잠시 후 다시 시도해 주세요. 계속 실패하면 로그아웃 후 카카오 로그인으로 다시 연결해 주세요.")
 
-                        if (st.session_state.get('integrated_comment_key') == weather_selection_key
-                                and st.session_state.get('integrated_comment')):
-                            integrated_ai_text = st.session_state['integrated_comment']
-                        else:
-                            integrated_ai_text = get_integrated_ai_message(
-                                wb, wa, sel_board_stop, sel_arrive_stop, trip_type
-                            )
-                        arrive_time_str = "" if is_leave else (f" ({arrive_row.get('arrival_time', '-')})" if arrive_row.get('arrival_time') else "")
+            with action_push:
+                push_enabled = can_send_weather_push(
+                    st.session_state,
+                    logged_in=st.session_state["user_info"] is not None,
+                    preview_user=st.session_state["preview_user"],
+                    result_matches=result_matches_selection,
+                )
+                if st.button(
+                    "🔔 Push로 보내기",
+                    width='stretch',
+                    disabled=not push_enabled,
+                ):
+                    subscription = st.session_state["web_push_subscription"]
 
-                        desc = (
-                            f"🚍 노선: {sel_route} ({trip_type})\n\n"
-                            f"🟢 [탑승] {sel_board_stop} ({board_row.get('arrival_time', '-')})\n"
-                            f"• 기온: {wb['temperature']} | 상태: {wb['sky_status']}\n\n"
-                            f"🔴 [하차] {sel_arrive_stop}{arrive_time_str}\n"
-                            f"• 기온: {wa['temperature']} | 상태: {wa['sky_status']}\n\n"
-                            f"🤖 **[AI 코멘트]**\n{integrated_ai_text}"
-                        )
-                        code, res = send_user_memo(user_id, f"[{sel_route}] 탑승·하차 날씨 안내", desc)
-                        if message_succeeded(code, res):
-                            st.success("카카오톡 통합 전송 완료!")
-                            st.toast("카카오톡 나에게 톡메시지가 전송되었습니다.", icon="💬")
-                        else:
-                            st.error("카카오톡 전송에 실패했습니다. 잠시 후 다시 시도해 주세요. 계속 실패하면 로그아웃 후 카카오 로그인으로 다시 연결해 주세요.")
-                else:
-                    st.button("💬 카카오톡 (로그인필요)", width='stretch', disabled=True)
+                    def expire_current_subscription():
+                        try:
+                            mark_subscription_expired(user_id, subscription)
+                        except PushSubscriptionError:
+                            logger.warning("Expired current browser Push cleanup failed")
+                        st.session_state["web_push_db_ownership"] = "none"
+                        invalidate_user_screen_data(st.session_state, user_id)
+
+                    ok, message = send_web_push(
+                        subscription,
+                        WEB_PUSH_CONFIG,
+                        weather_message.title,
+                        weather_message.body,
+                        st.session_state.get("web_push_click_url", ""),
+                        expired_handler=expire_current_subscription,
+                    )
+                    if ok:
+                        st.success(message)
+                    else:
+                        st.error(message)
+                if st.session_state["user_info"] and not st.session_state["preview_user"]:
+                    if st.session_state.get("web_push_db_ownership") != OWNERSHIP_CURRENT:
+                        st.caption("이 기기 알림을 먼저 등록해 주세요.")
+                    elif not result_matches_selection:
+                        st.caption("현재 선택으로 날씨를 조회한 뒤 전송할 수 있습니다.")
 
         st.divider()
         if st.session_state["user_info"]:
@@ -945,6 +1006,10 @@ with main_tab_target:
                 kakao_user_id=st.session_state["user_info"]["id"],
                 on_data_changed=lambda: invalidate_user_screen_data(
                     st.session_state, st.session_state["user_info"]["id"]
+                ),
+                active_device_count=(
+                    notification_settings["active_push_devices"]
+                    if notification_settings is not None else None
                 ),
             )
         elif st.session_state["preview_user"]:
@@ -1024,11 +1089,13 @@ with main_tab_target:
         st.info("등록된 노선 데이터가 없습니다.")
 
 # Render after the selectors, so OAuth always snapshots the current choices.
-if login_link is not None:
+if login_links:
     state = prepare_login(st.session_state.get("oauth_state"), st.session_state)
     st.session_state["oauth_state"] = state
     login_url = "https://kauth.kakao.com/oauth/authorize?" + urlencode({
         "client_id": KAKAO_CLIENT_ID, "redirect_uri": KAKAO_REDIRECT_URI,
         "response_type": "code", "state": state,
     })
-    login_link.markdown(f'<a href="{login_url}" target="_self" style="display:block;text-align:center;background:#FEE500;color:#000;padding:10px;border-radius:5px;text-decoration:none;font-weight:bold">💬 카카오계정으로 로그인</a>', unsafe_allow_html=True)
+    login_html = f'<a href="{login_url}" target="_self" style="display:block;text-align:center;background:#FEE500;color:#000;padding:10px;border-radius:5px;text-decoration:none;font-weight:bold">💬 카카오계정으로 로그인</a>'
+    for login_link in login_links:
+        login_link.markdown(login_html, unsafe_allow_html=True)

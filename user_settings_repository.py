@@ -79,7 +79,8 @@ def get_notification_settings(
                 active_days = [row[0] for row in cursor.fetchall()]
                 cursor.execute(
                     "SELECT count(*) FROM push_subscriptions WHERE user_id=%s "
-                    "AND enabled=TRUE AND (expiration_time IS NULL OR expiration_time>now())",
+                    "AND enabled=TRUE AND revoked_at IS NULL "
+                    "AND (expiration_time IS NULL OR expiration_time>now())",
                     (user_id,),
                 )
                 push_devices = cursor.fetchone()[0]
@@ -155,7 +156,7 @@ SELECT u.id, u.role, ns.exclude_holidays, ns.timezone, ns.delivery_channel,
            ARRAY[]::smallint[]
        ) AS active_days,
        (SELECT count(*) FROM push_subscriptions ps
-         WHERE ps.user_id=u.id AND ps.enabled=TRUE
+         WHERE ps.user_id=u.id AND ps.enabled=TRUE AND ps.revoked_at IS NULL
            AND (ps.expiration_time IS NULL OR ps.expiration_time>now())) AS active_push_devices
   FROM users u
   JOIN notification_settings ns ON ns.user_id=u.id

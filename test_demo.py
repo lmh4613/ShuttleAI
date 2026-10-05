@@ -270,6 +270,21 @@ class AppFlowTests(unittest.TestCase):
         self.assertTrue(any("이미 등록" in w.value for w in app.warning))
         self.assertEqual(dashboard_loader.call_count, 2)
 
+    def test_mobile_main_auth_controls_share_the_existing_login_flow(self):
+        logged_out = self.AppTest.from_string(self.source).run(timeout=15)
+        login_links = [
+            item.value for item in logged_out.markdown
+            if "카카오계정으로 로그인" in item.value
+        ]
+        self.assertGreaterEqual(len(login_links), 2)
+        self.assertEqual(len(set(login_links)), 1)
+
+        logged_in = self.login(12345)
+        self.assertTrue(any("테스트님 로그인 중" in item.value for item in logged_in.caption))
+        self.assertGreaterEqual(
+            len([button for button in logged_in.button if button.label == "로그아웃"]), 2
+        )
+
     def test_admin_preview_and_return(self):
         app = self.login(5070327065)
         before = {key: app.selectbox(key=key).value for key in support.SELECTION_KEYS}
@@ -573,7 +588,7 @@ class AppFlowTests(unittest.TestCase):
             self.assertTrue(all(m.value == "정보 없음" for m in app.metric))
             self.mock_api.side_effect = None
             self.mock_api.return_value = (503, {})
-            next(b for b in app.button if b.label == "💬 카카오톡 통합 날씨 전송").click().run()
+            next(b for b in app.button if b.label == "💬 카카오톡으로 보내기").click().run()
             self.assertEqual(len(app.exception), 0)
             self.assertTrue(any("전송에 실패" in e.value for e in app.error))
 

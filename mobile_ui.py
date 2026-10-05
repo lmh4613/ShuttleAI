@@ -7,15 +7,32 @@ def mobile_css():
     """Return mobile-only styles without changing desktop layout or app state."""
     return """
     <style>
+    .st-key-mobile_auth {
+        display: none;
+    }
+
     @media (max-width: 640px) {
         [data-testid="stMainBlockContainer"] {
             max-width: 100%;
-            padding: 1rem 0.75rem 3rem;
+            padding: calc(3.25rem + env(safe-area-inset-top, 0px))
+                     max(0.85rem, env(safe-area-inset-right, 0px))
+                     calc(3rem + env(safe-area-inset-bottom, 0px))
+                     max(0.85rem, env(safe-area-inset-left, 0px));
         }
 
         [data-testid="stMainBlockContainer"] h1 {
             font-size: 1.55rem;
-            line-height: 1.3;
+            line-height: 1.35;
+            max-width: 100%;
+            white-space: normal;
+            overflow: visible;
+            overflow-wrap: anywhere;
+            word-break: keep-all;
+            margin-top: 0;
+        }
+
+        .st-key-mobile_auth {
+            display: block;
         }
 
         [data-testid="stMainBlockContainer"] h2 {

@@ -170,7 +170,7 @@ def send_web_push(
             ttl=60,
             timeout=15,
         )
-        return True, "테스트 Push를 발송했습니다. 운영체제 알림 영역을 확인해 주세요."
+        return True, "Push 알림을 발송했습니다. 운영체제 알림 영역을 확인해 주세요."
     except Exception as exc:
         status_code = getattr(exc, "status_code", None)
         logger.warning("Web Push send failed status=%s type=%s", status_code, type(exc).__name__)
@@ -183,4 +183,4 @@ def send_web_push(
                         "Expired Push cleanup failed type=%s", type(handler_exc).__name__
                     )
             return False, "브라우저 구독이 만료되었습니다. 이 기기 알림을 해제한 뒤 다시 등록해 주세요."
-        return False, "테스트 Push 발송에 실패했습니다. VAPID 설정과 네트워크 연결을 확인해 주세요."
+        return False, "Push 알림 발송에 실패했습니다. VAPID 설정과 네트워크 연결을 확인해 주세요."
