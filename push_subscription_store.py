@@ -212,6 +212,58 @@ def deactivate_subscription(
         ) from None
 
 
+def count_active_push_subscriptions(
+    kakao_user_id: int,
+    *,
+    connection_factory: Callable = database_connection,
+) -> int:
+    """Count this enabled user's active, unrevoked, unexpired devices."""
+    try:
+        with connection_factory() as connection:
+            with connection.cursor() as cursor:
+                user_id = _lookup_enabled_user_id(cursor, kakao_user_id)
+                cursor.execute(
+                    "SELECT count(*) FROM push_subscriptions "
+                    "WHERE user_id=%s AND enabled=TRUE AND revoked_at IS NULL "
+                    "AND (expiration_time IS NULL OR expiration_time>now())",
+                    (user_id,),
+                )
+                return int(cursor.fetchone()[0])
+    except PushSubscriptionError:
+        raise
+    except Exception as exc:
+        logger.warning("Push subscription count failed type=%s", type(exc).__name__)
+        raise PushSubscriptionDatabaseError(
+            "등록된 알림 기기 수를 확인하지 못했습니다. 잠시 후 다시 시도해 주세요."
+        ) from None
+
+
+def deactivate_all_subscriptions(
+    kakao_user_id: int,
+    *,
+    transaction_factory: Callable = database_transaction,
+) -> int:
+    """Soft-revoke every active Push subscription owned by one enabled user."""
+    try:
+        with transaction_factory() as connection:
+            with connection.cursor() as cursor:
+                user_id = _lookup_enabled_user_id(cursor, kakao_user_id)
+                cursor.execute(
+                    "UPDATE push_subscriptions SET enabled=FALSE, revoked_at=now() "
+                    "WHERE user_id=%s AND enabled=TRUE AND revoked_at IS NULL "
+                    "RETURNING id",
+                    (user_id,),
+                )
+                return len(cursor.fetchall())
+    except PushSubscriptionError:
+        raise
+    except Exception as exc:
+        logger.warning("Push subscription bulk deactivation failed type=%s", type(exc).__name__)
+        raise PushSubscriptionDatabaseError(
+            "모든 기기 알림을 해제하지 못했습니다. 잠시 후 다시 시도해 주세요."
+        ) from None
+
+
 def mark_subscription_expired(
     kakao_user_id: int,
     subscription: object,

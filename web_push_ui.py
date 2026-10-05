@@ -1,6 +1,7 @@
 """Streamlit UI and browser bridge for the Web Push proof of concept."""
 
 from pathlib import Path
+from uuid import uuid4
 
 import streamlit as st
 import streamlit.components.v1 as components_v1
@@ -10,12 +11,13 @@ from push_subscription_store import (
     OWNERSHIP_NONE,
     OWNERSHIP_OTHER,
     PushSubscriptionError,
+    count_active_push_subscriptions,
+    deactivate_all_subscriptions,
     deactivate_subscription,
-    mark_subscription_expired,
     register_subscription,
     subscription_ownership,
 )
-from web_push import WebPushConfig, send_test_push, sync_subscription
+from web_push import WebPushConfig, sync_subscription
 
 
 _ASSET_DIR = Path(__file__).parent / "web_push_component_assets"
@@ -32,6 +34,17 @@ def web_push_display_state(has_browser_subscription, ownership=DB_UNKNOWN):
     if ownership == OWNERSHIP_CURRENT:
         return "REGISTERED_TO_CURRENT_USER"
     return "REGISTERED_TO_OTHER_USER"
+
+
+def can_send_weather_push(session, *, logged_in, preview_user, result_matches):
+    """Return whether the current browser may receive the displayed weather result."""
+    return bool(
+        logged_in
+        and not preview_user
+        and result_matches
+        and session.get("web_push_subscription")
+        and session.get("web_push_db_ownership") == OWNERSHIP_CURRENT
+    )
 
 
 _COMPONENT_HTML = """
@@ -164,6 +177,20 @@ export default function(component) {
     );
   }
 
+  async function applyServerUnsubscribe() {
+    const actionId = data.unsubscribe_all_action_id || '';
+    if (!actionId) return false;
+    const storageKey = 'shuttle-web-push-unsubscribe-all';
+    if (window.sessionStorage.getItem(storageKey) === actionId) return false;
+    window.sessionStorage.setItem(storageKey, actionId);
+    const registration = await findRegistration();
+    const subscription = registration ? await registration.pushManager.getSubscription() : null;
+    if (subscription) await subscription.unsubscribe();
+    if (registration) await registration.unregister();
+    showState('unsubscribed', null, 'unsubscribe_all_browser', subscription);
+    return true;
+  }
+
   subscribeButton.onclick = async () => {
     if (!supported || !data.config_ready || Notification.permission === 'denied') {
       return inspectState();
@@ -198,7 +225,9 @@ export default function(component) {
     }
   };
 
-  inspectState().catch(() => showState('error'));
+  applyServerUnsubscribe()
+    .then(handled => { if (!handled) return inspectState(); })
+    .catch(() => showState('error'));
 }
 """
 
@@ -269,6 +298,9 @@ def handle_web_push_event(
             if on_data_changed is not None:
                 on_data_changed()
             return True
+        if action == "unsubscribe_all_browser":
+            session["web_push_db_ownership"] = OWNERSHIP_NONE
+            return False
     except PushSubscriptionError as exc:
         session["web_push_db_ownership"] = DB_UNAVAILABLE
         session["web_push_db_status_error"] = str(exc)
@@ -280,6 +312,7 @@ def render_web_push_poc(
     config: WebPushConfig,
     kakao_user_id: int | None = None,
     on_data_changed=None,
+    active_device_count: int | None = None,
 ) -> None:
     """Render Web Push for one authenticated Kakao user with DB ownership."""
     if kakao_user_id is None:
@@ -290,6 +323,8 @@ def render_web_push_poc(
         st.session_state["web_push_owner_context"] = kakao_user_id
         st.session_state["web_push_db_ownership"] = DB_UNKNOWN
         st.session_state.pop("web_push_last_action_id", None)
+        st.session_state.pop("web_push_confirm_deactivate_all", None)
+        st.session_state.pop("web_push_unsubscribe_all_action_id", None)
 
     cached_subscription = st.session_state.get("web_push_subscription")
     if cached_subscription and st.session_state.get("web_push_db_ownership") == DB_UNKNOWN:
@@ -308,6 +343,14 @@ def render_web_push_poc(
         st.markdown("#### 🔔 기기 알림")
         st.caption("현재 브라우저의 Web Push 알림을 로그인한 계정에 연결합니다.")
 
+        if active_device_count is None:
+            try:
+                active_device_count = count_active_push_subscriptions(kakao_user_id)
+            except PushSubscriptionError:
+                active_device_count = None
+        if active_device_count is not None:
+            st.markdown(f"**등록된 알림 기기: {active_device_count}대**")
+
         subscription = st.session_state.get("web_push_subscription")
         result = component(
             key="web_push_browser_bridge",
@@ -318,6 +361,9 @@ def render_web_push_poc(
                 "service_worker_scope": service_worker_scope,
                 "server_endpoint": subscription.get("endpoint", "") if subscription else "",
                 "server_state": st.session_state.get("web_push_db_ownership", DB_UNKNOWN),
+                "unsubscribe_all_action_id": st.session_state.get(
+                    "web_push_unsubscribe_all_action_id", ""
+                ),
             },
             default={"event": None},
             on_event_change=lambda: None,
@@ -344,21 +390,50 @@ def render_web_push_poc(
         display_state = web_push_display_state(
             bool(subscription), st.session_state.get("web_push_db_ownership", DB_UNKNOWN)
         )
-        if display_state == "REGISTERED_TO_CURRENT_USER":
-            if st.button("🧪 테스트 Push 보내기", key="web_push_test_send", width="stretch"):
-                def expire_current_subscription():
-                    mark_subscription_expired(kakao_user_id, subscription)
-                    st.session_state["web_push_db_ownership"] = OWNERSHIP_NONE
-                    if on_data_changed is not None:
-                        on_data_changed()
+        if display_state != "REGISTERED_TO_CURRENT_USER":
+            st.caption("날씨 조회 결과를 보내려면 이 기기 알림을 현재 계정에 등록해 주세요.")
 
-                ok, message = send_test_push(
-                    subscription,
-                    config,
-                    st.session_state.get("web_push_click_url", ""),
-                    expired_handler=expire_current_subscription,
-                )
-                if ok:
-                    st.success(message)
-                else:
-                    st.error(message)
+        if active_device_count:
+            if not st.session_state.get("web_push_confirm_deactivate_all"):
+                if st.button(
+                    "내 모든 기기 알림 해제",
+                    key="web_push_deactivate_all_start",
+                    width="stretch",
+                ):
+                    st.session_state["web_push_confirm_deactivate_all"] = True
+                    st.rerun()
+            else:
+                st.warning("등록된 모든 기기의 Push 알림을 해제할까요?")
+                confirm_col, cancel_col = st.columns(2)
+                with confirm_col:
+                    if st.button(
+                        "모든 기기 해제 확인",
+                        key="web_push_deactivate_all_confirm",
+                        type="primary",
+                        width="stretch",
+                    ):
+                        try:
+                            current_browser_owned = (
+                                st.session_state.get("web_push_db_ownership")
+                                == OWNERSHIP_CURRENT
+                            )
+                            count = deactivate_all_subscriptions(kakao_user_id)
+                        except PushSubscriptionError as exc:
+                            st.error(str(exc))
+                        else:
+                            if current_browser_owned:
+                                st.session_state["web_push_db_ownership"] = OWNERSHIP_NONE
+                                st.session_state["web_push_unsubscribe_all_action_id"] = uuid4().hex
+                            st.session_state["web_push_flash_success"] = (
+                                f"등록된 알림 기기 {count}대를 해제했습니다."
+                            )
+                            st.session_state.pop("web_push_confirm_deactivate_all", None)
+                            if on_data_changed is not None:
+                                on_data_changed()
+                            st.rerun()
+                with cancel_col:
+                    if st.button(
+                        "취소", key="web_push_deactivate_all_cancel", width="stretch"
+                    ):
+                        st.session_state.pop("web_push_confirm_deactivate_all", None)
+                        st.rerun()

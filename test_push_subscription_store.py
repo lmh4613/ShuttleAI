@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+from datetime import datetime, timezone
 
 import pytest
 
@@ -60,7 +61,7 @@ class MemoryCursor:
             self.database.rows[endpoint_hash] = {
                 "id": row_id, "user_id": user_id, "endpoint": endpoint,
                 "p256dh": p256dh, "auth": auth, "expiration": expiration,
-                "enabled": True,
+                "enabled": True, "revoked": False,
             }
             self.result = None
         elif sql.startswith("SELECT u.kakao_user_id"):
@@ -74,6 +75,22 @@ class MemoryCursor:
                 self.result = (kakao_user_id,)
             else:
                 self.result = None
+        elif sql.startswith("SELECT count(*) FROM push_subscriptions"):
+            user_id = params[0]
+            self.result = (sum(
+                1 for row in self.database.rows.values()
+                if row["user_id"] == user_id and row["enabled"] and not row["revoked"]
+                and (row["expiration"] is None or row["expiration"] > datetime.now(timezone.utc))
+            ),)
+        elif "WHERE user_id=%s" in sql and sql.startswith("UPDATE push_subscriptions"):
+            user_id = params[0]
+            changed = []
+            for row in self.database.rows.values():
+                if row["user_id"] == user_id and row["enabled"] and not row["revoked"]:
+                    row["enabled"] = False
+                    row["revoked"] = True
+                    changed.append((row["id"],))
+            self.result = changed
         elif sql.startswith("UPDATE push_subscriptions"):
             kakao_user_id, endpoint_hash = params
             user_id = self.database.users.get(kakao_user_id)
@@ -88,6 +105,9 @@ class MemoryCursor:
 
     def fetchone(self):
         return self.result
+
+    def fetchall(self):
+        return list(self.result or [])
 
 
 def test_subscription_validation_and_canonicalization():
@@ -159,6 +179,47 @@ def test_current_lookup_and_owner_only_deactivate():
     assert not store.is_current_subscription_registered(
         101, current, connection_factory=database.connection
     )
+
+
+def test_active_count_and_deactivate_all_are_owner_scoped_soft_revocations():
+    database = MemoryDatabase()
+    for suffix in ("one", "two", "three"):
+        store.register_subscription(
+            101, subscription(suffix), transaction_factory=database.transaction
+        )
+    store.register_subscription(
+        202, subscription("other-user"), transaction_factory=database.transaction
+    )
+
+    assert store.count_active_push_subscriptions(
+        101, connection_factory=database.connection
+    ) == 3
+    assert store.deactivate_all_subscriptions(
+        101, transaction_factory=database.transaction
+    ) == 3
+    assert store.count_active_push_subscriptions(
+        101, connection_factory=database.connection
+    ) == 0
+    other = database.rows[store.endpoint_hash(subscription("other-user")["endpoint"])]
+    assert other["enabled"] is True
+    assert other["revoked"] is False
+
+
+def test_active_count_excludes_disabled_revoked_and_expired_devices():
+    database = MemoryDatabase()
+    for suffix in ("active", "disabled", "revoked", "expired"):
+        store.register_subscription(
+            101, subscription(suffix), transaction_factory=database.transaction
+        )
+    database.rows[store.endpoint_hash(subscription("disabled")["endpoint"])]["enabled"] = False
+    database.rows[store.endpoint_hash(subscription("revoked")["endpoint"])]["revoked"] = True
+    database.rows[store.endpoint_hash(subscription("expired")["endpoint"])]["expiration"] = (
+        datetime(2020, 1, 1, tzinfo=timezone.utc)
+    )
+
+    assert store.count_active_push_subscriptions(
+        101, connection_factory=database.connection
+    ) == 1
 
 
 @pytest.mark.parametrize("status_code", [404, 410])
