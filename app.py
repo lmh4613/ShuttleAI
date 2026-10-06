@@ -201,7 +201,11 @@ def route_stop_options(stops, is_leave):
             rows = stops
             if is_leave:
                 boarding = [row["stop_name"] for row in rows if row.get("boarding_allowed")]
-                arrival = [row["stop_name"] for row in rows if row.get("alighting_allowed")]
+                fixed_boarding = boarding[0] if boarding else rows[0].get("stop_name")
+                arrival = [
+                    row["stop_name"] for row in rows
+                    if row.get("alighting_allowed") and row.get("stop_name") != fixed_boarding
+                ]
                 return boarding or ["정류장 없음"], arrival or ["정류장 없음"]
             boarding = [row["stop_name"] for row in rows if row.get("boarding_allowed")]
             arrival_rows = [row for row in rows if row.get("alighting_allowed")]
@@ -212,10 +216,20 @@ def route_stop_options(stops, is_leave):
             return boarding or ["정류장 없음"], arrival or ["판교 제2테크노밸리"]
         stops = [row.get("stop_name") for row in stops]
     if is_leave:
-        return stops[:1] or ["정류장 없음"], stops or ["정류장 없음"]
+        return stops[:1] or ["정류장 없음"], stops[1:] or ["정류장 없음"]
     boarding = [stop for stop in stops if "(하차만)" not in stop]
     arrival = list(dict.fromkeys(["판교 제2테크노밸리"] + [stop for stop in stops if "(하차만)" in stop]))
     return boarding or ["정류장 없음"], arrival
+
+
+def invalid_stop_pair(is_leave, boarding_stop, arrival_stop):
+    return bool(is_leave and boarding_stop and boarding_stop == arrival_stop)
+
+
+def stop_pair_error(is_leave, boarding_stop, arrival_stop):
+    if invalid_stop_pair(is_leave, boarding_stop, arrival_stop):
+        return "퇴근길 하차 정류장은 탑승 정류장 이후 정류장만 선택할 수 있습니다."
+    return None
 
 
 def render_reconcile_preview(preview, *, region):
@@ -899,6 +913,7 @@ with main_tab_target:
             st.session_state["user_arrive_st"] = arrival_options[-1] if is_leave else arrival_options[0]
             st.session_state["user_arrive_st_fixed"] = "판교 제2테크노밸리"
         st.session_state["_stop_route_context"] = route_context
+        has_valid_destination = bool(arrival_options and arrival_options != ["정류장 없음"])
         
         st.markdown("---")
         with st.form("stop_weather_form"):
@@ -922,12 +937,16 @@ with main_tab_target:
             with col_s2:
                 st.markdown("🔴 **[2] 내 하차(도착) 정류장 선택**")
                 if is_leave:
-                    if st.session_state.get("user_arrive_st") not in stops:
+                    if st.session_state.get("user_arrive_st") not in arrival_options:
                         st.session_state.pop("user_arrive_st", None)
-                    default_arrive_idx = 0 if "user_arrive_st" in st.session_state else max(len(stops) - 1, 0)
+                    default_arrive_idx = (
+                        0 if "user_arrive_st" in st.session_state
+                        else max(len(arrival_options) - 1, 0)
+                    )
                     sel_arrive_stop = st.selectbox(
-                        "하차 정류장 (도착지)", stops if stops else ["정류장 없음"],
+                        "하차 정류장 (도착지)", arrival_options,
                         index=default_arrive_idx, key="user_arrive_st",
+                        disabled=not has_valid_destination,
                     )
                 else:
                     if st.session_state.get("user_arrive_st_fixed") not in arrival_options:
@@ -939,7 +958,10 @@ with main_tab_target:
             form_action_weather, form_action_favorite = st.columns(2)
             with form_action_weather:
                 weather_requested = st.form_submit_button(
-                    "🔍 탑승·하차 통합 날씨 조회", type="primary", width='stretch'
+                    "🔍 탑승·하차 통합 날씨 조회",
+                    type="primary",
+                    width='stretch',
+                    disabled=not has_valid_destination,
                 )
             with form_action_favorite:
                 favorite_requested = st.form_submit_button(
@@ -949,6 +971,7 @@ with main_tab_target:
                         not st.session_state["user_info"]
                         or st.session_state["preview_user"]
                         or bool(user_settings_error)
+                        or not has_valid_destination
                     ),
                 )
         
@@ -974,19 +997,23 @@ with main_tab_target:
         boarding_target = weather_api.resolve_boarding_datetime(board_row.get('arrival_time'))
         weather_selection_key = (sel_region, sel_route, sel_board_stop, sel_arrive_stop,
                                  boarding_target.isoformat() if boarding_target else None)
+        stop_pair_validation_error = stop_pair_error(is_leave, sel_board_stop, sel_arrive_stop)
         
         st.markdown("")
         if weather_requested:
-            with st.spinner("탑승지와 하차지의 기상청 날씨 및 AI 통합 코멘트 생성 중..."):
-                w_board = weather_api.get_weather_forecast_by_coords(board_lat, board_lon, stop_name=sel_board_stop, trip_type=trip_type, target_datetime=boarding_target, location="boarding")
-                w_arrive = weather_api.get_weather_forecast_by_coords(arrive_lat, arrive_lon, stop_name=sel_arrive_stop, trip_type=trip_type, target_datetime=boarding_target, location="destination")
-            st.session_state['w_board'] = w_board
-            st.session_state['w_arrive'] = w_arrive
-            st.session_state['integrated_stop_key'] = weather_selection_key
-            st.session_state['integrated_comment'] = get_integrated_ai_message(
-                w_board, w_arrive, sel_board_stop, sel_arrive_stop, trip_type
-            )
-            st.session_state['integrated_comment_key'] = weather_selection_key
+            if stop_pair_validation_error:
+                st.error(stop_pair_validation_error)
+            else:
+                with st.spinner("탑승지와 하차지의 기상청 날씨 및 AI 통합 코멘트 생성 중..."):
+                    w_board = weather_api.get_weather_forecast_by_coords(board_lat, board_lon, stop_name=sel_board_stop, trip_type=trip_type, target_datetime=boarding_target, location="boarding")
+                    w_arrive = weather_api.get_weather_forecast_by_coords(arrive_lat, arrive_lon, stop_name=sel_arrive_stop, trip_type=trip_type, target_datetime=boarding_target, location="destination")
+                st.session_state['w_board'] = w_board
+                st.session_state['w_arrive'] = w_arrive
+                st.session_state['integrated_stop_key'] = weather_selection_key
+                st.session_state['integrated_comment'] = get_integrated_ai_message(
+                    w_board, w_arrive, sel_board_stop, sel_arrive_stop, trip_type
+                )
+                st.session_state['integrated_comment_key'] = weather_selection_key
         
         if 'w_board' in st.session_state and 'w_arrive' in st.session_state and st.session_state.get('integrated_stop_key') == weather_selection_key:
             wb = st.session_state['w_board']
@@ -1070,6 +1097,8 @@ with main_tab_target:
                         try:
                             if user_settings_error:
                                 raise UserSettingsError(user_settings_error)
+                            if stop_pair_validation_error:
+                                raise UserSettingsError(stop_pair_validation_error)
                             create_favorite(user_id, new_item)
                             invalidate_user_screen_data(st.session_state, user_id)
                             st.success("통합 즐겨찾기에 추가되었습니다!")

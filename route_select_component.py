@@ -23,7 +23,7 @@ def native_route_select(label: str, options, *, key: str) -> str:
         st.session_state[key] = current
 
     component_identity = hashlib.sha1(
-        json.dumps({"options": choices, "value": current}, ensure_ascii=False).encode("utf-8")
+        json.dumps({"options": choices}, ensure_ascii=False).encode("utf-8")
     ).hexdigest()[:12]
     selected = _native_route_select(
         label=label,

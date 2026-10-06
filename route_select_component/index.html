@@ -104,6 +104,7 @@
     const select = document.getElementById("route-select");
     const label = document.getElementById("route-label");
     let currentValue = "";
+    let optionSignature = "";
 
     function send(type, data) {
       window.parent.postMessage(
@@ -122,15 +123,20 @@
 
     function render(args) {
       const options = Array.isArray(args.options) ? args.options : [];
-      currentValue = options.includes(args.value) ? args.value : (options[0] || "");
+      const nextSignature = JSON.stringify(options);
       label.textContent = args.label || "노선 선택";
-      select.innerHTML = "";
-      for (const optionValue of options) {
-        const option = document.createElement("option");
-        option.value = optionValue;
-        option.textContent = optionValue;
-        option.selected = optionValue === currentValue;
-        select.appendChild(option);
+      if (nextSignature !== optionSignature) {
+        optionSignature = nextSignature;
+        currentValue = options.includes(args.value) ? args.value : (options[0] || "");
+        select.innerHTML = "";
+        for (const optionValue of options) {
+          const option = document.createElement("option");
+          option.value = optionValue;
+          option.textContent = optionValue;
+          option.selected = optionValue === currentValue;
+          select.appendChild(option);
+        }
+        select.value = currentValue;
       }
       setFrameHeight();
     }
