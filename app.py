@@ -73,7 +73,7 @@ def perf_log(section, started_at, **fields):
     elapsed_ms = (time.perf_counter() - started_at) * 1000
     payload = " ".join(f"{key}={value}" for key, value in fields.items())
     _perf_events.append((section, elapsed_ms, dict(fields)))
-    logger.info("[PERF] section=%s ms=%.1f %s", section, elapsed_ms, payload)
+    print(f"[PERF] section={section} ms={elapsed_ms:.1f} {payload}", flush=True)
     return elapsed_ms
 
 
@@ -1215,9 +1215,10 @@ if login_links:
     for login_link in login_links:
         login_link.markdown(login_html, unsafe_allow_html=True)
 
-logger.info(
-    "[PERF] section=rerun_total ms=%.1f aiven_queries=%s sections=%s",
-    (time.perf_counter() - _rerun_start) * 1000,
-    _aiven_query_count,
-    ",".join(section for section, _, _ in _perf_events),
+print(
+    "[PERF] section=rerun_total "
+    f"ms={(time.perf_counter() - _rerun_start) * 1000:.1f} "
+    f"aiven_queries={_aiven_query_count} "
+    f"sections={','.join(section for section, _, _ in _perf_events)}",
+    flush=True,
 )
