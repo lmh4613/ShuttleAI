@@ -428,6 +428,101 @@ class AppFlowTests(unittest.TestCase):
             self.assertEqual(favorite['arrive_stop'], 'D (하차만)')
             self.assertEqual(favorite['arrive_lat'], 37.3)
 
+    def test_favorite_uses_current_form_stops_without_weather_lookup(self):
+        fixtures = [dict(region='seoul', route_name='출근 다중', stop_name=name,
+                         arrival_time=arrival, lat=lat, lon=127.1,
+                         boarding_allowed=boarding, alighting_allowed=alighting,
+                         is_default_dropoff=False)
+                    for name, arrival, lat, boarding, alighting in [
+                        ('기본 탑승', '07:00', 37.1, True, False),
+                        ('선택 탑승', '07:10', 37.2, True, False),
+                        ('선택 하차 (하차만)', '07:30', 37.3, False, True),
+                        ('기본 하차 (하차만)', '07:40', 37.4, False, True),
+                    ]]
+        with patch.object(route_repository, 'load_routes_for_ui', return_value=fixtures):
+            app = self.login(12345)
+            self.select_route(app, '출근 다중')
+            with patch.object(weather_api, 'get_weather_forecast_by_coords') as fetch:
+                app.selectbox(key='user_board_st').select('선택 탑승')
+                app.selectbox(key='user_arrive_st_fixed').select('선택 하차 (하차만)')
+                next(b for b in app.button if b.label == '⭐ 통합 즐겨찾기 추가').click().run()
+            fetch.assert_not_called()
+            self.assertEqual(len(app.exception), 0)
+            favorite = self.favorite_records[0]
+            self.assertEqual(favorite['board_stop'], '선택 탑승')
+            self.assertEqual(favorite['arrive_stop'], '선택 하차 (하차만)')
+            self.assertEqual(favorite['board_lat'], 37.2)
+            self.assertEqual(favorite['arrive_lat'], 37.3)
+
+    def test_favorite_after_weather_lookup_uses_current_form_stops(self):
+        fixtures = [dict(region='seoul', route_name='출근 조회 후 저장', stop_name=name,
+                         arrival_time=arrival, lat=lat, lon=127.1,
+                         boarding_allowed=boarding, alighting_allowed=alighting,
+                         is_default_dropoff=False)
+                    for name, arrival, lat, boarding, alighting in [
+                        ('기본 탑승', '07:00', 37.1, True, False),
+                        ('선택 탑승', '07:10', 37.2, True, False),
+                        ('선택 하차 (하차만)', '07:30', 37.3, False, True),
+                    ]]
+        available = {
+            "available": True, "temperature": "10°C", "sky_status": "맑음",
+            "precipitation": "없음", "wind": "약함",
+        }
+        with patch.object(route_repository, 'load_routes_for_ui', return_value=fixtures):
+            app = self.login(12345)
+            self.select_route(app, '출근 조회 후 저장')
+            with patch.object(weather_api, 'get_weather_forecast_by_coords',
+                              return_value=available):
+                app.selectbox(key='user_board_st').select('선택 탑승')
+                app.selectbox(key='user_arrive_st_fixed').select('선택 하차 (하차만)')
+                next(b for b in app.button if b.label == '🔍 탑승·하차 통합 날씨 조회').click().run()
+            next(b for b in app.button if b.label == '⭐ 통합 즐겨찾기 추가').click().run()
+            self.assertEqual(len(app.exception), 0)
+            favorite = self.favorite_records[0]
+            self.assertEqual(favorite['board_stop'], '선택 탑승')
+            self.assertEqual(favorite['arrive_stop'], '선택 하차 (하차만)')
+
+    def test_evening_favorite_uses_current_arrival_without_weather_lookup(self):
+        fixtures = [dict(region='seoul', route_name='(퇴근) 다중', stop_name=name,
+                         arrival_time=arrival, lat=lat, lon=127.1)
+                    for name, arrival, lat in [
+                        ('퇴근 첫 정류장', '18:00', 37.1),
+                        ('선택 하차', '18:20', 37.2),
+                        ('기본 하차', '18:40', 37.3),
+                    ]]
+        with patch.object(route_repository, 'load_routes_for_ui', return_value=fixtures):
+            app = self.login(12345)
+            self.select_route(app, '(퇴근) 다중')
+            self.assertTrue(app.selectbox(key='user_board_st').disabled)
+            with patch.object(weather_api, 'get_weather_forecast_by_coords') as fetch:
+                app.selectbox(key='user_arrive_st').select('선택 하차')
+                next(b for b in app.button if b.label == '⭐ 통합 즐겨찾기 추가').click().run()
+            fetch.assert_not_called()
+            self.assertEqual(len(app.exception), 0)
+            favorite = self.favorite_records[0]
+            self.assertEqual(favorite['board_stop'], '퇴근 첫 정류장')
+            self.assertEqual(favorite['arrive_stop'], '선택 하차')
+
+    def test_stop_form_selection_changes_do_not_submit_actions(self):
+        fixtures = [dict(region='seoul', route_name='출근 선택만', stop_name=name,
+                         arrival_time='07:00', lat=37.1, lon=127.1,
+                         boarding_allowed=boarding, alighting_allowed=alighting,
+                         is_default_dropoff=False)
+                    for name, boarding, alighting in [
+                        ('기본 탑승', True, False),
+                        ('선택 탑승', True, False),
+                        ('선택 하차 (하차만)', False, True),
+                    ]]
+        with patch.object(route_repository, 'load_routes_for_ui', return_value=fixtures):
+            app = self.login(12345)
+            self.select_route(app, '출근 선택만')
+            with patch.object(weather_api, 'get_weather_forecast_by_coords') as fetch:
+                app.selectbox(key='user_board_st').select('선택 탑승').run()
+                app.selectbox(key='user_arrive_st_fixed').select('선택 하차 (하차만)').run()
+            fetch.assert_not_called()
+            self.repository_mocks["create_favorite"].assert_not_called()
+            self.assertEqual(len(self.favorite_records), 0)
+
     def test_notification_channel_and_favorite_settings_use_repository(self):
         app = self.login(12345)
         dashboard_loader = self.repository_mocks["get_user_dashboard_data"]
