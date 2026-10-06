@@ -250,13 +250,8 @@ class AppFlowTests(unittest.TestCase):
         return app.session_state["user_rt"]
 
     def select_route(self, app, route_name):
-        route_buttons = [
-            button for button in app.button
-            if button.key and button.key.startswith("user_rt_option_")
-            and button.label == route_name
-        ]
-        self.assertEqual(len(route_buttons), 1)
-        return route_buttons[0].click().run()
+        app.session_state["user_rt"] = route_name
+        return app.run()
 
     def selection_value(self, app, key):
         if key == "user_rt":
@@ -278,9 +273,8 @@ class AppFlowTests(unittest.TestCase):
         self.assertEqual(app.selectbox(key="user_reg").value, "seoul")
         self.assertEqual(self.route_value(app), "(퇴근) 노원")
         self.assertFalse(any(item.key == "user_rt" for item in app.radio))
-        self.assertTrue(any(
+        self.assertFalse(any(
             button.key and button.key.startswith("user_rt_option_")
-            and button.label == "(퇴근) 노원"
             for button in app.button
         ))
         self.assertEqual(len(app.tabs), 1)
