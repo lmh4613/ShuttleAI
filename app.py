@@ -63,6 +63,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 _rerun_start = time.perf_counter()
 _perf_events = []
 _aiven_query_count = 0
