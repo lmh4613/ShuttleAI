@@ -253,6 +253,11 @@ class AppFlowTests(unittest.TestCase):
         app.session_state["user_rt"] = route_name
         return app.run()
 
+    def open_admin_management(self, app):
+        app.radio(key="admin_view_mode").set_value("admin").run()
+        self.assertEqual(len(app.exception), 0)
+        return app
+
     def selection_value(self, app, key):
         if key == "user_rt":
             return self.route_value(app)
@@ -277,7 +282,7 @@ class AppFlowTests(unittest.TestCase):
             button.key and button.key.startswith("user_rt_option_")
             for button in app.button
         ))
-        self.assertEqual(len(app.tabs), 1)
+        self.assertEqual(len(app.tabs), 0)
         next(b for b in app.button if b.label == "⭐ 통합 즐겨찾기 추가").click().run()
         self.assertEqual(len(app.exception), 0)
         self.assertEqual(len(self.favorite_records), 1)
@@ -311,7 +316,7 @@ class AppFlowTests(unittest.TestCase):
         next(b for b in app.button if b.label == "일반 사용자 모드로 보기").click().run()
         self.assertTrue(app.session_state["is_admin"])
         self.assertTrue(app.session_state["preview_user"])
-        self.assertEqual(len(app.tabs), 1)
+        self.assertEqual(len(app.tabs), 0)
         favorite_button = next(b for b in app.button if b.label == "⭐ 통합 즐겨찾기 추가")
         self.assertTrue(favorite_button.disabled)
         self.assertEqual(len(app.exception), 0)
@@ -328,6 +333,7 @@ class AppFlowTests(unittest.TestCase):
 
     def test_weather_preview_admin_only_and_user_mode_cleanup(self):
         admin = self.login(5070327065)
+        self.open_admin_management(admin)
         self.assertTrue(any(e.label == '🧪 날씨 코멘트 테스트' for e in admin.expander))
         self.assertTrue(any(e.label == '🔔 알림 발송 이력' for e in admin.expander))
         real_selection = self.selection_snapshot(admin)
@@ -417,6 +423,7 @@ class AppFlowTests(unittest.TestCase):
 
     def test_admin_global_policy_ui_calls_authorized_repository_service(self):
         app = self.login(5070327065)
+        self.open_admin_management(app)
         selector = app.selectbox(key="admin_global_notification_policy")
         self.assertEqual(selector.value, "AUTO")
         selector.select("PUSH")
@@ -425,9 +432,21 @@ class AppFlowTests(unittest.TestCase):
             5070327065, "PUSH"
         )
 
+    def test_admin_route_snapshot_is_cached_across_user_ui_reruns(self):
+        app = self.login(5070327065)
+        snapshot_loader = self.route_mocks["load_admin_route_snapshot"]
+        self.assertEqual(snapshot_loader.call_count, 0)
+        app.selectbox(key="user_reg").select("gyeonggi").run()
+        self.assertEqual(snapshot_loader.call_count, 0)
+        self.open_admin_management(app)
+        self.assertEqual(snapshot_loader.call_count, 1)
+        app.selectbox(key="user_reg").select("gyeonggi").run()
+        self.assertEqual(snapshot_loader.call_count, 1)
+
     def test_admin_grid_saves_to_aiven_without_writing_route_json(self):
         before = Path("routes_db.json").read_bytes()
         app = self.login(5070327065)
+        self.open_admin_management(app)
 
         next(b for b in app.button if b.label == "💾 그리드 변경사항 저장").click().run()
 
@@ -439,6 +458,7 @@ class AppFlowTests(unittest.TestCase):
 
     def test_admin_route_preview_requires_explicit_change_candidate_decision(self):
         app = self.login(5070327065)
+        self.open_admin_management(app)
         app.session_state["route_import_pending_seoul"] = {
             "rows": [],
             "preview": {
@@ -474,6 +494,7 @@ class AppFlowTests(unittest.TestCase):
 
     def test_admin_coordinate_update_uses_route_stop_identity(self):
         app = self.login(5070327065)
+        self.open_admin_management(app)
         with patch.object(weather_api, "get_coordinates_by_gemini", return_value=(37.5, 127.2)):
             next(b for b in app.button
                  if b.label == "🎯 선택 정류장 좌표 재계산 및 갱신").click().run()
