@@ -877,6 +877,18 @@ with main_tab_target:
         is_leave = "퇴근" in str(sel_route)
         trip_type = "퇴근길" if is_leave else "출근길"
         boarding_options, arrival_options = route_stop_options(route_stops, is_leave)
+        user_id = st.session_state["user_info"]["id"] if st.session_state["user_info"] else None
+        user_settings = []
+        notification_settings = None
+        user_settings_error = None
+        if user_id is not None:
+            try:
+                dashboard_data = get_user_screen_data(st.session_state, user_id)
+                notification_settings = dashboard_data["notification_settings"]
+                user_settings = dashboard_data["favorites"]
+            except (UserSettingsError, ValueError) as exc:
+                user_settings_error = str(exc)
+                st.error(user_settings_error)
 
         # Reset before creating stop widgets, even when routes share stop names.
         # On the first render, preserve any selections restored by OAuth.
@@ -924,9 +936,21 @@ with main_tab_target:
                         "하차 정류장 (도착지)", arrival_options,
                         key="user_arrive_st_fixed",
                     )
-            weather_requested = st.form_submit_button(
-                "🔍 탑승·하차 통합 날씨 조회", type="primary", width='stretch'
-            )
+            form_action_weather, form_action_favorite = st.columns(2)
+            with form_action_weather:
+                weather_requested = st.form_submit_button(
+                    "🔍 탑승·하차 통합 날씨 조회", type="primary", width='stretch'
+                )
+            with form_action_favorite:
+                favorite_requested = st.form_submit_button(
+                    "⭐ 통합 즐겨찾기 추가",
+                    width='stretch',
+                    disabled=(
+                        not st.session_state["user_info"]
+                        or st.session_state["preview_user"]
+                        or bool(user_settings_error)
+                    ),
+                )
         
         board_row = next((i for i in route_stops if i.get('stop_name') == sel_board_stop), {})
         
@@ -963,19 +987,6 @@ with main_tab_target:
                 w_board, w_arrive, sel_board_stop, sel_arrive_stop, trip_type
             )
             st.session_state['integrated_comment_key'] = weather_selection_key
-        
-        user_id = st.session_state["user_info"]["id"] if st.session_state["user_info"] else None
-        user_settings = []
-        notification_settings = None
-        user_settings_error = None
-        if user_id is not None:
-            try:
-                dashboard_data = get_user_screen_data(st.session_state, user_id)
-                notification_settings = dashboard_data["notification_settings"]
-                user_settings = dashboard_data["favorites"]
-            except (UserSettingsError, ValueError) as exc:
-                user_settings_error = str(exc)
-                st.error(user_settings_error)
         
         if 'w_board' in st.session_state and 'w_arrive' in st.session_state and st.session_state.get('integrated_stop_key') == weather_selection_key:
             wb = st.session_state['w_board']
@@ -1042,9 +1053,7 @@ with main_tab_target:
             action_favorite, action_kakao, action_push = st.columns(3)
             with action_favorite:
                 if st.session_state["user_info"]:
-                    can_change_db_settings = not st.session_state["preview_user"] and not user_settings_error
-                    if st.button("⭐ 통합 즐겨찾기 추가", width='stretch',
-                                 disabled=not can_change_db_settings):
+                    if favorite_requested:
                         new_item = {
                             "region": sel_region,
                             "route_name": sel_route,
@@ -1059,6 +1068,8 @@ with main_tab_target:
                             "arrive_lon": arrive_lon,
                         }
                         try:
+                            if user_settings_error:
+                                raise UserSettingsError(user_settings_error)
                             create_favorite(user_id, new_item)
                             invalidate_user_screen_data(st.session_state, user_id)
                             st.success("통합 즐겨찾기에 추가되었습니다!")
@@ -1070,7 +1081,7 @@ with main_tab_target:
                     if st.session_state["preview_user"]:
                         st.caption("일반 사용자 미리보기에서는 즐겨찾기를 변경할 수 없습니다.")
                 else:
-                    st.button("⭐ 즐겨찾기 (로그인필요)", width='stretch', disabled=True)
+                    st.caption("즐겨찾기는 로그인 후 추가할 수 있습니다.")
 
             with action_kakao:
                 kakao_enabled = bool(st.session_state["user_info"] and weather_message)
