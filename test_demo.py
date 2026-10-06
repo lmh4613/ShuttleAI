@@ -246,6 +246,17 @@ class AppFlowTests(unittest.TestCase):
         self.assertEqual(len(app.exception), 0)
         return app
 
+    def route_selector(self, app):
+        return app.radio(key="user_rt")
+
+    def selection_value(self, app, key):
+        if key == "user_rt":
+            return self.route_selector(app).value
+        return app.selectbox(key=key).value
+
+    def selection_snapshot(self, app):
+        return {key: self.selection_value(app, key) for key in support.SELECTION_KEYS}
+
     def test_new_user_role_selection_and_favorite(self):
         app = self.login(12345)
         dashboard_loader = self.repository_mocks["get_user_dashboard_data"]
@@ -256,7 +267,7 @@ class AppFlowTests(unittest.TestCase):
         self.assertEqual(len(app.selectbox(key="user_board_st").options), 1)
         self.assertFalse(app.session_state["is_admin"])
         self.assertEqual(app.selectbox(key="user_reg").value, "seoul")
-        self.assertEqual(app.selectbox(key="user_rt").value, "(퇴근) 노원")
+        self.assertEqual(self.route_selector(app).value, "(퇴근) 노원")
         self.assertEqual(len(app.tabs), 1)
         next(b for b in app.button if b.label == "⭐ 통합 즐겨찾기 추가").click().run()
         self.assertEqual(len(app.exception), 0)
@@ -287,7 +298,7 @@ class AppFlowTests(unittest.TestCase):
 
     def test_admin_preview_and_return(self):
         app = self.login(5070327065)
-        before = {key: app.selectbox(key=key).value for key in support.SELECTION_KEYS}
+        before = self.selection_snapshot(app)
         next(b for b in app.button if b.label == "일반 사용자 모드로 보기").click().run()
         self.assertTrue(app.session_state["is_admin"])
         self.assertTrue(app.session_state["preview_user"])
@@ -303,20 +314,20 @@ class AppFlowTests(unittest.TestCase):
         next(b for b in app.button if b.label == "관리자 모드로 돌아가기").click().run()
         self.assertTrue(app.session_state["is_admin"])
         self.assertFalse(app.session_state["preview_user"])
-        self.assertEqual({key: app.selectbox(key=key).value for key in support.SELECTION_KEYS}, before)
+        self.assertEqual(self.selection_snapshot(app), before)
         self.assertEqual(len(app.exception), 0)
 
     def test_weather_preview_admin_only_and_user_mode_cleanup(self):
         admin = self.login(5070327065)
         self.assertTrue(any(e.label == '🧪 날씨 코멘트 테스트' for e in admin.expander))
         self.assertTrue(any(e.label == '🔔 알림 발송 이력' for e in admin.expander))
-        real_selection = {key: admin.selectbox(key=key).value for key in support.SELECTION_KEYS}
+        real_selection = self.selection_snapshot(admin)
         with patch('weather_advice_preview.generate_preview', wraps=__import__('weather_advice_preview').generate_preview) as generate:
             admin.selectbox(key='weather_preview_scenario').select('명확한 눈 예보 + 추운 날씨').run()
             self.assertGreater(generate.call_count, 0)
             self.assertEqual(len(admin.exception), 0)
             self.assertTrue(any('눈이 예상됩니다' in i.value for i in admin.info))
-            self.assertEqual({key: admin.selectbox(key=key).value for key in support.SELECTION_KEYS}, real_selection)
+            self.assertEqual(self.selection_snapshot(admin), real_selection)
             with patch('weather_comment_ai.generate_once', return_value={
                     'text': '출근길에는 눈이 예상됩니다. 따뜻한 외투를 챙기세요.',
                     'source': 'gemini', 'reason': ''}) as ai:
@@ -344,7 +355,7 @@ class AppFlowTests(unittest.TestCase):
                                             ('출근 테스트', 'E (하차만)', 37.4)]]
         with patch.object(route_repository, 'load_routes_for_ui', return_value=fixtures):
             app = self.login(12345)
-            app.selectbox(key='user_rt').select('출근 테스트').run()
+            self.route_selector(app).set_value('출근 테스트').run()
             self.assertEqual(len(app.exception), 0)
             self.assertEqual(app.selectbox(key='user_arrive_st_fixed').value, '판교 제2테크노밸리')
             self.assertEqual(app.selectbox(key='user_board_st').options, ['탑승A'])
@@ -506,7 +517,7 @@ class AppFlowTests(unittest.TestCase):
                                         ('(퇴근) A', '(퇴근) B'),
                                         ('(퇴근) B', '출근 A')]:
                 with self.subTest(source=source, destination=destination):
-                    app.selectbox(key='user_rt').select(source).run()
+                    self.route_selector(app).set_value(source).run()
                     if '퇴근' in source:
                         app.selectbox(key='user_arrive_st').select('공통 하차').run()
                     else:
@@ -516,7 +527,7 @@ class AppFlowTests(unittest.TestCase):
                         app.run()
                         self.assertEqual(app.selectbox(key='user_board_st').value, '공통 탑승')
                         self.assertEqual(app.selectbox(key='user_arrive_st_fixed').value, '공통 (하차만)')
-                    app.selectbox(key='user_rt').select(destination).run()
+                    self.route_selector(app).set_value(destination).run()
                     self.assertEqual(len(app.exception), 0)
                     self.assertEqual(app.selectbox(key='user_board_st').value, routes[destination][0])
                     self.assertEqual(app.selectbox(key='user_board_st').disabled, '퇴근' in destination)

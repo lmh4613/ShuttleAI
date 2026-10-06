@@ -21,7 +21,12 @@ from push_subscription_store import (
 )
 from web_push import load_web_push_config, send_web_push
 from web_push_ui import can_send_weather_push, render_web_push_poc
-from user_screen_cache import get_user_screen_data, invalidate_user_screen_data
+from user_screen_cache import (
+    get_user_route_data,
+    get_user_screen_data,
+    invalidate_user_route_data,
+    invalidate_user_screen_data,
+)
 from notification_repository import (
     NotificationRepositoryError,
     load_kakao_credentials,
@@ -34,7 +39,6 @@ from route_repository import (
     RouteValidationError,
     StaleRouteSnapshotError,
     load_admin_route_snapshot,
-    load_routes_for_ui,
     preview_region_reconcile,
     reconcile_admin_route_edits,
     reconcile_region_routes,
@@ -204,6 +208,15 @@ def route_stop_options(stops, is_leave):
     return boarding or ["정류장 없음"], arrival
 
 
+def non_searching_list_select(label, options, *, key):
+    """Render a keyboard-free list selector for mobile route changes."""
+    choices = list(options) or ["노선 없음"]
+    current = st.session_state.get(key)
+    if current not in choices:
+        st.session_state[key] = choices[0]
+    return st.radio(label, choices, key=key)
+
+
 def render_reconcile_preview(preview, *, region):
     labels = [
         ("추가 노선", "routes_added"), ("수정 노선", "routes_updated"),
@@ -330,6 +343,7 @@ def render_route_import(region, label, uploader_key, existing_rows):
                     expected_snapshot=pending["preview"]["snapshot"],
                     change_decisions=decisions,
                 )
+                invalidate_user_route_data(st.session_state)
                 st.session_state.pop(pending_key, None)
                 st.session_state[success_key] = True
                 st.rerun()
@@ -428,10 +442,10 @@ if ("code" in query_params or "error" in query_params) and st.session_state["use
                 st.session_state["login_error"] = "카카오 로그인에 연결하지 못했습니다. 인터넷 연결을 확인하고 다시 로그인해 주세요."
     st.rerun()
 
-# Load the route source of truth once per Streamlit execution.
+# Load the route source of truth once per Streamlit session.
 route_load_error = None
 try:
-    db_data = load_routes_for_ui()
+    db_data = get_user_route_data(st.session_state)
 except RouteRepositoryError as exc:
     db_data = []
     route_load_error = str(exc)
@@ -641,6 +655,7 @@ if tab1 is not None:
                         logger.warning("Route coordinate refresh failed type=%s", type(exc).__name__)
                         st.error("정류장 좌표를 갱신하지 못했습니다.")
                     else:
+                        invalidate_user_route_data(st.session_state)
                         st.toast("정류장 좌표가 성공적으로 갱신되었습니다!", icon="🎯")
                         st.rerun()
 
@@ -661,6 +676,7 @@ if tab1 is not None:
                         identity_map=admin_snapshot["identity_map"],
                         expected_snapshots=admin_snapshot["snapshots"],
                     )
+                    invalidate_user_route_data(st.session_state)
                     st.toast("노선 변경사항이 Aiven에 저장되었습니다.", icon="✅")
                     st.rerun()
                 except RouteRepositoryError as exc:
@@ -689,7 +705,7 @@ with main_tab_target:
         routes = list(dict.fromkeys(i.get('route_name') for i in reg_filtered if i.get('route_name')))
         
         with col_r2:
-            sel_route = st.selectbox("노선 선택", routes if routes else ["노선 없음"], key="user_rt")
+            sel_route = non_searching_list_select("노선 선택", routes, key="user_rt")
         
         route_stops = [i for i in reg_filtered if i.get('route_name') == sel_route]
         stops = [i.get('stop_name') for i in route_stops] if route_stops else []
@@ -788,26 +804,27 @@ with main_tab_target:
             
             if not wb.get("available", True) or not wa.get("available", True):
                 st.warning("일부 정류장의 날씨 정보를 불러오지 못했습니다. 잠시 후 다시 조회해 주세요.")
-            st.divider()
-            st.markdown(f"### 📊 [{sel_route}] 탑승·하차 날씨 비교 리포트")
-            
-            res_col1, res_col2 = st.columns(2)
-            with res_col1:
-                with st.container(border=True):
-                    st.markdown(f"#### 🟢 탑승지: {sel_board_stop}")
-                    st.caption(f"탑승 예정 시간: {boarding_target:%Y-%m-%d %H:%M}" if boarding_target else "등록된 탑승시간 없음")
-                    m1, m2 = st.columns(2)
-                    m1.metric("기온", wb["temperature"])
-                    m2.metric("하늘상태", wb["sky_status"])
-            
-            with res_col2:
-                with st.container(border=True):
-                    st.markdown(f"#### 🔴 하차지: {sel_arrive_stop}")
-                    if not is_leave:
-                        st.caption("최종 목적지" if sel_arrive_stop == "판교 제2테크노밸리" else "선택한 하차지")
-                    m3, m4 = st.columns(2)
-                    m3.metric("기온", wa["temperature"])
-                    m4.metric("하늘상태", wa["sky_status"])
+            with st.container(key="mobile_weather_result"):
+                st.divider()
+                st.markdown(f"### 📊 [{sel_route}] 탑승·하차 날씨 비교 리포트")
+
+                res_col1, res_col2 = st.columns(2)
+                with res_col1:
+                    with st.container(border=True):
+                        st.markdown(f"#### 🟢 탑승지: {sel_board_stop}")
+                        st.caption(f"탑승 예정 시간: {boarding_target:%Y-%m-%d %H:%M}" if boarding_target else "등록된 탑승시간 없음")
+                        m1, m2 = st.columns(2)
+                        m1.metric("기온", wb["temperature"])
+                        m2.metric("하늘상태", wb["sky_status"])
+
+                with res_col2:
+                    with st.container(border=True):
+                        st.markdown(f"#### 🔴 하차지: {sel_arrive_stop}")
+                        if not is_leave:
+                            st.caption("최종 목적지" if sel_arrive_stop == "판교 제2테크노밸리" else "선택한 하차지")
+                        m3, m4 = st.columns(2)
+                        m3.metric("기온", wa["temperature"])
+                        m4.metric("하늘상태", wa["sky_status"])
             
             st.markdown("")
             if st.session_state.get('integrated_comment_key') == weather_selection_key:

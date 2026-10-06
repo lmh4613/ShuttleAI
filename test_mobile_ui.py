@@ -37,3 +37,12 @@ def test_mobile_auth_is_hidden_on_desktop_and_visible_on_mobile():
     assert "display: none" in desktop
     assert ".st-key-mobile_auth" in mobile
     assert "display: block" in mobile
+
+
+def test_mobile_weather_result_is_compact():
+    css = mobile_css()
+
+    assert ".st-key-mobile_weather_result" in css
+    assert "padding: 0.45rem 0.6rem" in css
+    assert "font-size: 0.78rem" in css
+    assert "font-size: 1rem" in css
