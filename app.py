@@ -23,11 +23,14 @@ from push_subscription_store import (
 from web_push import load_web_push_config, send_web_push
 from web_push_ui import can_send_weather_push, render_web_push_poc
 from user_screen_cache import (
+    ADMIN_ROUTE_SNAPSHOT_CACHE_KEY,
     CACHE_KEY,
     CACHE_TTL_SECONDS,
     ROUTE_CACHE_KEY,
+    get_admin_route_snapshot,
     get_user_route_data,
     get_user_screen_data,
+    invalidate_admin_route_snapshot,
     invalidate_user_route_data,
     invalidate_user_screen_data,
 )
@@ -42,7 +45,6 @@ from route_repository import (
     RouteRepositoryError,
     RouteValidationError,
     StaleRouteSnapshotError,
-    load_admin_route_snapshot,
     preview_region_reconcile,
     reconcile_admin_route_edits,
     reconcile_region_routes,
@@ -67,13 +69,18 @@ logger.setLevel(logging.INFO)
 _rerun_start = time.perf_counter()
 _perf_events = []
 _aiven_query_count = 0
+_perf_run_id = 0
 
 
 def perf_log(section, started_at, **fields):
     elapsed_ms = (time.perf_counter() - started_at) * 1000
     payload = " ".join(f"{key}={value}" for key, value in fields.items())
     _perf_events.append((section, elapsed_ms, dict(fields)))
-    print(f"[PERF] section={section} ms={elapsed_ms:.1f} {payload}", flush=True)
+    print(
+        f"[PERF] run_id={_perf_run_id} section={section} "
+        f"ms={elapsed_ms:.1f} {payload}",
+        flush=True,
+    )
     return elapsed_ms
 
 
@@ -91,6 +98,8 @@ def count_aiven_query(happened=True):
 
 st.set_page_config(page_title="AI 셔틀버스 날씨 알림", page_icon="🚌", layout="wide")
 inject_mobile_styles()
+_perf_run_id = st.session_state.get("_perf_run_id", 0) + 1
+st.session_state["_perf_run_id"] = _perf_run_id
 
 def get_env_variable(var_name, default=""):
     """환경 변수를 os.getenv에서 먼저 찾고, 없으면 st.secrets에서 가져옵니다."""
@@ -365,6 +374,7 @@ def render_route_import(region, label, uploader_key, existing_rows):
                     change_decisions=decisions,
                 )
                 invalidate_user_route_data(st.session_state)
+                invalidate_admin_route_snapshot(st.session_state)
                 st.session_state.pop(pending_key, None)
                 st.session_state[success_key] = True
                 st.rerun()
@@ -562,6 +572,21 @@ with st.container(key="mobile_auth"):
         if st.button("로그아웃", key="mobile_logout", width="stretch"):
             logout_user_session()
 
+admin_management_mode = False
+if st.session_state["is_admin"] and not st.session_state["preview_user"]:
+    st.session_state.setdefault("admin_view_mode", "weather")
+    selected_admin_view = st.radio(
+        "화면 선택",
+        ["weather", "admin"],
+        format_func=lambda value: {
+            "weather": "날씨/즐겨찾기",
+            "admin": "관리자 관리",
+        }[value],
+        horizontal=True,
+        key="admin_view_mode",
+    )
+    admin_management_mode = selected_admin_view == "admin"
+
 if route_load_error:
     st.error(route_load_error)
 sorted_db_data = sorted(
@@ -570,36 +595,43 @@ sorted_db_data = sorted(
 )
 admin_snapshot = {"rows": [], "identity_map": {}, "snapshots": {}}
 admin_route_error = None
-if st.session_state["is_admin"] and not st.session_state["preview_user"]:
+if admin_management_mode:
+    admin_snapshot_cache_hit = ADMIN_ROUTE_SNAPSHOT_CACHE_KEY in st.session_state
     _admin_route_started = time.perf_counter()
-    count_aiven_query()
     try:
-        admin_snapshot = load_admin_route_snapshot()
+        admin_snapshot = get_admin_route_snapshot(st.session_state)
+        count_aiven_query(not admin_snapshot_cache_hit)
     except RouteRepositoryError as exc:
         admin_route_error = str(exc)
+        count_aiven_query(not admin_snapshot_cache_hit)
     finally:
         perf_log(
             "admin_route_snapshot",
             _admin_route_started,
+            cache_hit=admin_snapshot_cache_hit,
             rows=len(admin_snapshot["rows"]),
-            db_query=True,
+            db_query=not admin_snapshot_cache_hit,
         )
 admin_db_data = admin_snapshot["rows"]
 
-if st.session_state["is_admin"] and not st.session_state["preview_user"]:
-    tab1, tab2 = st.tabs(["👑 [어드민] 노선 관리 및 그리드 편집", "🌤️ 셔틀버스 탑승·하차 통합 날씨 및 즐겨찾기"], default="🌤️ 셔틀버스 탑승·하차 통합 날씨 및 즐겨찾기")
-else:
-    tab1 = None
-    tab2 = st.tabs(["🌤️ 셔틀버스 탑승·하차 통합 날씨 및 즐겨찾기"])[0]
+admin_container = st.container() if admin_management_mode else None
+main_tab_target = st.container()
+_admin_ui_started = time.perf_counter()
 
-if tab1 is None:
+if admin_container is None:
     from weather_advice_preview import reset_preview
     from notification_history_ui import reset_notification_history
     reset_preview()
     reset_notification_history()
+    perf_log(
+        "admin_ui",
+        _admin_ui_started,
+        rendered=False,
+        mode=st.session_state.get("admin_view_mode", "weather"),
+    )
 
-if tab1 is not None:
-    with tab1:
+if admin_container is not None:
+    with admin_container:
         st.header("📋 지역별 셔틀버스 노선 문서 업로드 및 관리")
         if admin_route_error:
             st.error(admin_route_error)
@@ -697,6 +729,7 @@ if tab1 is not None:
                         st.error("정류장 좌표를 갱신하지 못했습니다.")
                     else:
                         invalidate_user_route_data(st.session_state)
+                        invalidate_admin_route_snapshot(st.session_state)
                         st.toast("정류장 좌표가 성공적으로 갱신되었습니다!", icon="🎯")
                         st.rerun()
 
@@ -718,6 +751,7 @@ if tab1 is not None:
                         expected_snapshots=admin_snapshot["snapshots"],
                     )
                     invalidate_user_route_data(st.session_state)
+                    invalidate_admin_route_snapshot(st.session_state)
                     st.toast("노선 변경사항이 Aiven에 저장되었습니다.", icon="✅")
                     st.rerun()
                 except RouteRepositoryError as exc:
@@ -729,8 +763,8 @@ if tab1 is not None:
         render_admin_notification_history(
             st.session_state['is_admin'], st.session_state['preview_user']
         )
+    perf_log("admin_ui", _admin_ui_started, rendered=True, rows=len(admin_db_data))
 
-main_tab_target = tab2 if tab1 is not None else tab2
 _main_ui_started = time.perf_counter()
 with main_tab_target:
     st.subheader("🔄 셔틀버스 탑승지 & 하차지 통합 날씨 안내")
@@ -1216,7 +1250,7 @@ if login_links:
         login_link.markdown(login_html, unsafe_allow_html=True)
 
 print(
-    "[PERF] section=rerun_total "
+    f"[PERF] run_id={_perf_run_id} section=rerun_total "
     f"ms={(time.perf_counter() - _rerun_start) * 1000:.1f} "
     f"aiven_queries={_aiven_query_count} "
     f"sections={','.join(section for section, _, _ in _perf_events)}",

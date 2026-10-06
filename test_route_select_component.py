@@ -1,7 +1,5 @@
 from unittest.mock import Mock
 
-import pytest
-
 import route_select_component
 
 
@@ -35,18 +33,18 @@ def test_native_route_select_resets_missing_route_to_first_option(monkeypatch):
     assert session["user_rt"] == "(출근) 망포"
 
 
-def test_native_route_select_updates_session_and_reruns_on_component_change(monkeypatch):
+def test_native_route_select_updates_session_without_extra_rerun(monkeypatch):
     session = {"user_rt": "(출근) 망포"}
     monkeypatch.setattr(route_select_component.st, "session_state", session)
     monkeypatch.setattr(route_select_component, "_native_route_select",
                         Mock(return_value="(출근) 영통"))
-    monkeypatch.setattr(route_select_component.st, "rerun",
-                        Mock(side_effect=RuntimeError("rerun")))
+    rerun = Mock()
+    monkeypatch.setattr(route_select_component.st, "rerun", rerun)
 
-    with pytest.raises(RuntimeError, match="rerun"):
-        route_select_component.native_route_select(
-            "노선 선택", ["(출근) 망포", "(출근) 영통"], key="user_rt"
-        )
+    selected = route_select_component.native_route_select(
+        "노선 선택", ["(출근) 망포", "(출근) 영통"], key="user_rt"
+    )
 
+    assert selected == "(출근) 영통"
     assert session["user_rt"] == "(출근) 영통"
-    route_select_component.st.rerun.assert_called_once_with()
+    rerun.assert_not_called()

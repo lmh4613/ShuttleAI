@@ -1,10 +1,13 @@
 from unittest.mock import Mock
 
 from user_screen_cache import (
+    ADMIN_ROUTE_SNAPSHOT_CACHE_KEY,
     CACHE_KEY,
     ROUTE_CACHE_KEY,
+    get_admin_route_snapshot,
     get_user_screen_data,
     get_user_route_data,
+    invalidate_admin_route_snapshot,
     invalidate_user_route_data,
     invalidate_user_screen_data,
 )
@@ -87,3 +90,33 @@ def test_route_cache_invalidates_only_when_explicitly_requested():
 
 def test_route_cache_invalidate_returns_false_when_empty():
     assert not invalidate_user_route_data({})
+
+
+def test_admin_route_snapshot_cache_reuses_session_data():
+    session = {}
+    snapshot = {"rows": [{"route_name": "A"}], "identity_map": {}, "snapshots": {}}
+    loader = Mock(return_value=snapshot)
+
+    first = get_admin_route_snapshot(session, loader=loader)
+    second = get_admin_route_snapshot(session, loader=loader)
+
+    assert first is second
+    assert session[ADMIN_ROUTE_SNAPSHOT_CACHE_KEY] is first
+    loader.assert_called_once_with()
+
+
+def test_admin_route_snapshot_invalidation_forces_reload():
+    session = {}
+    loader = Mock(side_effect=[
+        {"rows": [{"route_name": "A"}], "identity_map": {}, "snapshots": {}},
+        {"rows": [{"route_name": "B"}], "identity_map": {}, "snapshots": {}},
+    ])
+
+    assert get_admin_route_snapshot(session, loader=loader)["rows"][0]["route_name"] == "A"
+    assert invalidate_admin_route_snapshot(session)
+    assert get_admin_route_snapshot(session, loader=loader)["rows"][0]["route_name"] == "B"
+    assert loader.call_count == 2
+
+
+def test_admin_route_snapshot_invalidate_returns_false_when_empty():
+    assert not invalidate_admin_route_snapshot({})

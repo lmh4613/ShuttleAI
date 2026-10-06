@@ -34,5 +34,4 @@ def native_route_select(label: str, options, *, key: str) -> str:
     )
     if selected in choices and selected != st.session_state.get(key):
         st.session_state[key] = selected
-        st.rerun()
     return st.session_state[key]

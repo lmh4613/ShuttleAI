@@ -8,6 +8,7 @@ import time
 
 CACHE_KEY = "_user_screen_dashboard_cache"
 ROUTE_CACHE_KEY = "_user_screen_route_cache"
+ADMIN_ROUTE_SNAPSHOT_CACHE_KEY = "_admin_route_snapshot_cache"
 CACHE_TTL_SECONDS = 300
 
 
@@ -70,4 +71,28 @@ def invalidate_user_route_data(session: MutableMapping) -> bool:
     if ROUTE_CACHE_KEY not in session:
         return False
     del session[ROUTE_CACHE_KEY]
+    return True
+
+
+def get_admin_route_snapshot(
+    session: MutableMapping,
+    *,
+    loader: Callable | None = None,
+) -> dict:
+    """Return the admin route snapshot once per Streamlit session."""
+    cached = session.get(ADMIN_ROUTE_SNAPSHOT_CACHE_KEY)
+    if isinstance(cached, dict):
+        return cached
+    if loader is None:
+        from route_repository import load_admin_route_snapshot
+        loader = load_admin_route_snapshot
+    loaded = dict(loader())
+    session[ADMIN_ROUTE_SNAPSHOT_CACHE_KEY] = loaded
+    return loaded
+
+
+def invalidate_admin_route_snapshot(session: MutableMapping) -> bool:
+    if ADMIN_ROUTE_SNAPSHOT_CACHE_KEY not in session:
+        return False
+    del session[ADMIN_ROUTE_SNAPSHOT_CACHE_KEY]
     return True
