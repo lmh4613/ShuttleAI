@@ -9,6 +9,7 @@ from notification_repository import (
     NotificationTarget,
     PushDevice,
 )
+from scheduled_push_repository import ScheduledPushTest
 from web_push import WebPushConfig
 
 
@@ -35,6 +36,19 @@ def target(*, devices=None, trip_type="morning", scheduled=time(8, 0), weekday=2
 
 def device(number):
     return PushDevice(number, f"https://push.example.test/{number}", f"p{number}", f"a{number}")
+
+
+def scheduled_test(number=1, *, urgency="normal"):
+    return ScheduledPushTest(
+        id=number,
+        user_id=1,
+        scheduled_at=datetime(2026, 9, 30, 18, 30, tzinfo=KST),
+        message="모바일 오프라인 수신 테스트",
+        urgency=urgency,
+        ttl_seconds=60,
+        target_subscription_ids=None,
+        status="PROCESSING",
+    )
 
 
 class History:
@@ -64,6 +78,38 @@ class History:
 
     def complete_run(self, run_id, status, error_code=None):
         self.runs[run_id].update(status=status, error=error_code)
+
+
+class ScheduledHistory:
+    def __init__(self, tests=None, devices=None):
+        self.tests = list(tests or [])
+        self.devices = list(devices or [])
+        self.deliveries = []
+        self.completed = {}
+        self.claims = 0
+
+    def claim_due(self, _now):
+        self.claims += 1
+        tests, self.tests = self.tests, []
+        return tests
+
+    def load_devices(self, _test):
+        return list(self.devices)
+
+    def start_delivery(self, test_id, subscription_id):
+        self.deliveries.append({
+            "test_id": test_id,
+            "subscription_id": subscription_id,
+            "status": "PROCESSING",
+            "error": None,
+        })
+        return len(self.deliveries)
+
+    def complete_delivery(self, delivery_id, status, error_code=None):
+        self.deliveries[delivery_id - 1].update(status=status, error=error_code)
+
+    def complete_test(self, test_id, status, error_code=None):
+        self.completed[test_id] = {"status": status, "error": error_code}
 
 
 def cycle(targets, *, push_sender=None, kakao_sender=None, sent=None, attempts=None,
@@ -111,6 +157,7 @@ def test_one_user_multiple_devices_and_same_logical_notification_dedup():
                    history=history)
     assert result["push_success"] == 2
     assert sender.call_count == 2
+    assert [call.kwargs["urgency"] for call in sender.call_args_list] == ["high", "high"]
     first_body = sender.call_args_list[0].args[3]
     assert first_body.startswith("08:00 탑승 예정 ·")
     assert "탑승지" not in first_body and "하차지" not in first_body
@@ -175,7 +222,7 @@ def test_expired_device_is_deactivated_and_other_device_continues(status_code):
     calls = []
     history = History()
 
-    def sender(_subscription, _config, _title, _body, _url, expired_handler):
+    def sender(_subscription, _config, _title, _body, _url, *, expired_handler, **_kwargs):
         if not calls:
             calls.append(status_code)
             expired_handler()
@@ -327,6 +374,85 @@ def test_global_override_changes_runtime_channel_not_user_preference():
     )
     assert result["push_success"] == 1
     assert current.delivery_channel == "KAKAO"
+
+
+def run_scheduled(history, *, sender=None, now=datetime(2026, 9, 30, 18, 30, tzinfo=KST)):
+    return worker.run_scheduled_push_test_cycle(
+        config=CONFIG,
+        now=now,
+        push_sender=sender or Mock(return_value=(True, "ok")),
+        due_loader=history.claim_due,
+        device_loader=history.load_devices,
+        delivery_starter=history.start_delivery,
+        delivery_completer=history.complete_delivery,
+        test_completer=history.complete_test,
+    )
+
+
+def test_scheduled_push_not_sent_before_due_when_not_claimed():
+    history = ScheduledHistory(tests=[], devices=[device(1)])
+    sender = Mock()
+    result = run_scheduled(history, sender=sender)
+    assert result["scheduled_tests"] == 0
+    sender.assert_not_called()
+    assert history.deliveries == []
+
+
+def test_scheduled_push_due_sends_once_to_each_device_and_dedups_next_cycle():
+    history = ScheduledHistory(
+        tests=[scheduled_test(10, urgency="high")],
+        devices=[device(1), device(2)],
+    )
+    sender = Mock(return_value=(True, "ok"))
+    result = run_scheduled(history, sender=sender)
+    second = run_scheduled(history, sender=sender)
+
+    assert result["push_success"] == 2
+    assert second["scheduled_tests"] == 0
+    assert sender.call_count == 2
+    assert [item["status"] for item in history.deliveries] == ["SUCCESS", "SUCCESS"]
+    assert history.completed[10] == {"status": "SUCCESS", "error": None}
+    assert sender.call_args_list[0].kwargs["urgency"] == "high"
+    assert sender.call_args_list[0].kwargs["include_received_time"] is True
+    body = sender.call_args_list[0].args[3]
+    assert "예약: 18:30:00" in body
+    assert "서버 발송: 18:30:00" in body
+    assert "TTL: 60s" in body
+    assert "Urgency: high" in body
+
+
+def test_scheduled_push_partial_failure_and_expired_device_handling():
+    history = ScheduledHistory(
+        tests=[scheduled_test(11, urgency="normal")],
+        devices=[device(1), device(2)],
+    )
+    calls = []
+
+    def sender(_subscription, _config, _title, _body, _url, *, expired_handler, **_kwargs):
+        calls.append(_kwargs["urgency"])
+        if len(calls) == 1:
+            expired_handler()
+            return False, "expired"
+        return True, "ok"
+
+    with patch.object(worker, "deactivate_push_device") as deactivate:
+        result = run_scheduled(history, sender=sender)
+
+    assert result["push_success"] == 1
+    deactivate.assert_called_once_with(1, 1)
+    assert [item["status"] for item in history.deliveries] == ["EXPIRED", "SUCCESS"]
+    assert history.completed[11] == {"status": "PARTIAL", "error": "PUSH_SEND_FAILED"}
+    assert calls == ["normal", "normal"]
+
+
+def test_scheduled_push_all_failed_status():
+    history = ScheduledHistory(
+        tests=[scheduled_test(12)],
+        devices=[device(1), device(2)],
+    )
+    run_scheduled(history, sender=Mock(return_value=(False, "failed")))
+    assert [item["status"] for item in history.deliveries] == ["FAILED", "FAILED"]
+    assert history.completed[12] == {"status": "FAILED", "error": "PUSH_SEND_FAILED"}
 
 
 def test_duplicate_worker_start_is_blocked(monkeypatch):

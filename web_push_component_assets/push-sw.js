@@ -7,8 +7,17 @@ self.addEventListener("push", (event) => {
   }
 
   const title = payload.title || "ShuttleAI 알림";
+  const receivedTime = new Date().toLocaleTimeString("ko-KR", {
+    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+  const body = payload.include_received_time
+    ? `${payload.body || "새로운 셔틀 알림이 있습니다."}\n수신: ${receivedTime}`
+    : payload.body || "새로운 셔틀 알림이 있습니다.";
   const options = {
-    body: payload.body || "새로운 셔틀 알림이 있습니다.",
+    body,
     icon: payload.icon || undefined,
     badge: payload.badge || undefined,
     data: { url: payload.url || self.location.origin + "/" },

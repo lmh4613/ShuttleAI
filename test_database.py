@@ -140,6 +140,7 @@ def test_project_migrations_keep_existing_versions_and_add_route_lifecycle_in_or
         ("002", "notification_channel"),
         ("003", "notification_history"),
         ("004", "route_lifecycle"),
+        ("005", "scheduled_push_tests"),
     ]
 
 
@@ -163,3 +164,18 @@ def test_route_lifecycle_migration_adds_soft_delete_without_touching_history():
     assert "WHERE active" in sql
     assert "DELETE FROM" not in sql.upper()
     assert "notification_runs" not in sql and "notification_deliveries" not in sql
+
+
+def test_scheduled_push_test_migration_is_separate_from_operational_history():
+    sql = Path("migrations/005_scheduled_push_tests.sql").read_text("utf-8")
+    assert "CREATE TABLE IF NOT EXISTS scheduled_push_tests" in sql
+    assert "CREATE TABLE IF NOT EXISTS scheduled_push_test_deliveries" in sql
+    assert "CHECK (urgency IN ('normal', 'high'))" in sql
+    assert "ttl_seconds INTEGER NOT NULL DEFAULT 60 CHECK (ttl_seconds = 60)" in sql
+    assert "CHECK (status IN ('SCHEDULED', 'PROCESSING', 'SUCCESS', 'PARTIAL', 'FAILED'))" in sql
+    assert "idx_scheduled_push_tests_due" in sql
+    assert "notification_runs" not in sql
+    assert "notification_deliveries" not in sql
+    lowered = sql.lower()
+    for sensitive in ("endpoint", "p256dh", "auth", "token", "kakao_user_id"):
+        assert sensitive not in lowered
