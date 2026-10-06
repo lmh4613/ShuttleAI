@@ -3,6 +3,7 @@ import json
 import re
 import tempfile
 import unittest
+from datetime import datetime, time, timedelta
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -10,6 +11,19 @@ import requests
 import demo_support as support
 import route_repository
 import weather_api
+
+
+def test_temporary_perf_diagnostics_removed_from_app_source():
+    source = Path("app.py").read_text(encoding="utf-8")
+    for token in (
+        "[PERF]",
+        "perf_log",
+        "rerun_total",
+        "_perf_run_id",
+        "count_aiven_query",
+        "fresh_dashboard_cache_hit",
+    ):
+        assert token not in source
 
 
 def app_functions(*names):
@@ -226,8 +240,27 @@ class AppFlowTests(unittest.TestCase):
             name: patcher.start()
             for name, patcher in zip(repository_patches, self.repository_patchers)
         }
+        from scheduled_push_repository import ScheduledPushDevice
+        self.scheduled_push_created = []
+        scheduled_patches = {
+            "load_push_test_devices": lambda _user_id: [
+                ScheduledPushDevice(7, "기기 #7 · 최근 확인 2026-10-06 18:00:00")
+            ],
+            "list_scheduled_push_tests": lambda _user_id: [],
+            "create_scheduled_push_test": lambda *args: self.scheduled_push_created.append(args) or 101,
+        }
+        self.scheduled_patchers = [
+            patch(f"scheduled_push_repository.{name}", side_effect=value)
+            for name, value in scheduled_patches.items()
+        ]
+        self.scheduled_mocks = {
+            name: patcher.start()
+            for name, patcher in zip(scheduled_patches, self.scheduled_patchers)
+        }
 
     def tearDown(self):
+        for patcher in reversed(self.scheduled_patchers):
+            patcher.stop()
         for patcher in reversed(self.route_patchers):
             patcher.stop()
         for patcher in reversed(self.repository_patchers):
@@ -436,6 +469,34 @@ class AppFlowTests(unittest.TestCase):
         self.repository_mocks["update_global_notification_policy"].assert_called_with(
             5070327065, "PUSH"
         )
+
+    def test_admin_scheduled_push_test_ui_is_admin_only_and_lists_devices(self):
+        app = self.login(5070327065)
+        self.assertFalse(any("예약 Push 테스트" in item.value for item in app.subheader))
+        self.open_admin_management(app)
+        self.assertTrue(any("예약 Push 테스트" in item.value for item in app.subheader))
+        self.assertTrue(any("Push provider 요청 성공" in item.value for item in app.caption))
+        self.assertEqual(app.selectbox(key="admin_push_test_urgency").options, ["normal", "high"])
+        self.assertTrue(any(item.key == "admin_push_test_target_mode" for item in app.radio))
+        self.assertTrue(any(button.label == "예약 등록" for button in app.button))
+        self.assertTrue(any("아래 '예약 등록' 버튼" in item.value for item in app.caption))
+
+    def test_admin_scheduled_push_test_form_creates_only_on_submit(self):
+        app = self.login(5070327065)
+        self.open_admin_management(app)
+        creator = self.scheduled_mocks["create_scheduled_push_test"]
+        creator.assert_not_called()
+
+        app.date_input(key="admin_push_test_date").set_value(
+            datetime.now().date() + timedelta(days=1)
+        ).run()
+        app.time_input(key="admin_push_test_time").set_value(time(18, 30)).run()
+        app.selectbox(key="admin_push_test_urgency").select("high").run()
+        app.text_area(key="admin_push_test_message").set_value("예약 입력 테스트").run()
+        creator.assert_not_called()
+
+        next(button for button in app.button if button.label == "예약 등록").click().run()
+        creator.assert_called_once()
 
     def test_admin_route_snapshot_is_cached_across_user_ui_reruns(self):
         app = self.login(5070327065)

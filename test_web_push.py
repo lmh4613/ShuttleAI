@@ -7,9 +7,11 @@ import pytest
 from web_push import (
     PUSH_BODY,
     PUSH_TITLE,
+    WEB_PUSH_TTL_SECONDS,
     WebPushConfig,
     build_test_payload,
     load_web_push_config,
+    send_web_push,
     send_test_push,
     sync_subscription,
     validate_subscription,
@@ -112,8 +114,32 @@ def test_test_push_uses_only_webpush_sender():
     assert calls[0]["subscription_info"] == VALID_SUBSCRIPTION
     assert json.loads(calls[0]["data"])["title"] == PUSH_TITLE
     assert calls[0]["vapid_claims"] == {"sub": "mailto:admin@example.com"}
-    assert calls[0]["ttl"] == 60
+    assert calls[0]["ttl"] == WEB_PUSH_TTL_SECONDS
     assert calls[0]["timeout"] == 15
+    assert "headers" not in calls[0]
+
+
+def test_scheduled_push_can_set_urgency_header_without_changing_default():
+    calls = []
+
+    def sender(**kwargs):
+        calls.append(kwargs)
+
+    ok, _message = send_web_push(
+        VALID_SUBSCRIPTION,
+        ready_config(),
+        "[ShuttleAI 예약 Push 테스트]",
+        "예약: 18:30:00",
+        sender=sender,
+        urgency="high",
+        include_received_time=True,
+    )
+
+    assert ok
+    assert calls[0]["headers"] == {"Urgency": "high"}
+    assert calls[0]["ttl"] == WEB_PUSH_TTL_SECONDS
+    payload = json.loads(calls[0]["data"])
+    assert payload["include_received_time"] is True
 
 
 def test_test_push_handles_missing_config_and_expired_subscription():
@@ -148,6 +174,8 @@ def test_service_worker_and_component_keep_web_push_isolated():
     assert 'addEventListener("push"' in service_worker
     assert 'addEventListener("notificationclick"' in service_worker
     assert "showNotification" in service_worker
+    assert "include_received_time" in service_worker
+    assert "수신:" in service_worker
     assert "Notification.requestPermission()" in component
     assert "navigator.serviceWorker.register" in component
     assert "@media (max-width: 640px)" in component

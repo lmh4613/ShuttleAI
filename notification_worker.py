@@ -19,6 +19,13 @@ from notification_repository import (
     load_notification_targets,
     start_notification_delivery,
 )
+from scheduled_push_repository import (
+    claim_due_scheduled_push_tests,
+    complete_scheduled_push_delivery,
+    complete_scheduled_push_test,
+    load_scheduled_push_devices_for_test,
+    start_scheduled_push_delivery,
+)
 from weather_comment_ai import generate_weather_advice
 from web_push import WebPushConfig, send_web_push
 from user_settings_repository import get_global_notification_policy
@@ -98,6 +105,134 @@ def _messages(target, boarding, boarding_weather, destination_weather, comment):
         f"🤖 **[AI 코멘트]**\n{comment}"
     )
     return push_title, push_body, kakao_title, kakao_body
+
+
+def _scheduled_push_test_message(test, now: datetime) -> tuple[str, str]:
+    scheduled_at = as_kst(test.scheduled_at)
+    send_at = as_kst(now)
+    return (
+        "[ShuttleAI 예약 Push 테스트]",
+        "\n".join([
+            f"예약: {scheduled_at:%H:%M:%S}",
+            f"서버 발송: {send_at:%H:%M:%S}",
+            f"TTL: {test.ttl_seconds}s",
+            f"Urgency: {test.urgency}",
+            f"메시지: {test.message}",
+        ]),
+    )
+
+
+def run_scheduled_push_test_cycle(
+    *,
+    config: WebPushConfig,
+    now: datetime | None = None,
+    push_sender=send_web_push,
+    due_loader=claim_due_scheduled_push_tests,
+    device_loader=load_scheduled_push_devices_for_test,
+    delivery_starter=start_scheduled_push_delivery,
+    delivery_completer=complete_scheduled_push_delivery,
+    test_completer=complete_scheduled_push_test,
+) -> dict:
+    """Send due admin scheduled Push tests through the real Web Push path."""
+    now = as_kst(now)
+    stats = {
+        "scheduled_tests": 0,
+        "push_success": 0,
+        "db_skipped": False,
+    }
+    try:
+        tests = due_loader(now)
+    except Exception as exc:
+        logger.warning("Scheduled Push test cycle skipped type=%s", type(exc).__name__)
+        stats["db_skipped"] = True
+        return stats
+
+    stats["scheduled_tests"] = len(tests)
+    for test in tests:
+        try:
+            devices = device_loader(test)
+        except Exception as exc:
+            logger.warning("Scheduled Push test device query failed type=%s", type(exc).__name__)
+            try:
+                test_completer(test.id, "FAILED", "NO_PUSH_SUBSCRIPTION")
+            except Exception as history_exc:
+                logger.warning("Scheduled Push test completion failed type=%s",
+                               type(history_exc).__name__)
+            continue
+
+        if not devices:
+            try:
+                test_completer(test.id, "FAILED", "NO_PUSH_SUBSCRIPTION")
+            except Exception as exc:
+                logger.warning("Scheduled Push test completion failed type=%s",
+                               type(exc).__name__)
+            continue
+
+        title, body = _scheduled_push_test_message(test, now)
+        success_count = 0
+        expired_count = 0
+        for device in devices:
+            try:
+                delivery_id = delivery_starter(test.id, device.id)
+            except Exception as exc:
+                logger.warning("Scheduled Push delivery start failed type=%s",
+                               type(exc).__name__)
+                stats["db_skipped"] = True
+                continue
+
+            expired = False
+
+            def expire_device(device=device):
+                nonlocal expired
+                expired = True
+                deactivate_push_device(device.id, test.user_id)
+
+            try:
+                ok, _message = push_sender(
+                    device.subscription(),
+                    config,
+                    title,
+                    body,
+                    config.click_url,
+                    expired_handler=expire_device,
+                    urgency=test.urgency,
+                    include_received_time=True,
+                )
+                if ok:
+                    success_count += 1
+                    stats["push_success"] += 1
+                    delivery_status, delivery_error = "SUCCESS", None
+                elif expired:
+                    expired_count += 1
+                    delivery_status, delivery_error = "EXPIRED", "PUSH_EXPIRED"
+                else:
+                    delivery_status, delivery_error = "FAILED", "PUSH_SEND_FAILED"
+            except Exception as exc:
+                logger.warning("Scheduled Push send failed type=%s", type(exc).__name__)
+                delivery_status, delivery_error = "FAILED", "PUSH_SEND_FAILED"
+
+            try:
+                delivery_completer(delivery_id, delivery_status, delivery_error)
+            except Exception as exc:
+                logger.warning("Scheduled Push delivery completion failed type=%s",
+                               type(exc).__name__)
+
+        if success_count == len(devices):
+            test_status, test_error = "SUCCESS", None
+        elif success_count:
+            test_status, test_error = "PARTIAL", "PUSH_SEND_FAILED"
+        else:
+            test_status = "FAILED"
+            test_error = (
+                "PUSH_EXPIRED" if expired_count == len(devices)
+                else "PUSH_SEND_FAILED"
+            )
+        try:
+            test_completer(test.id, test_status, test_error)
+        except Exception as exc:
+            logger.warning("Scheduled Push test completion failed type=%s",
+                           type(exc).__name__)
+    return stats
 
 
 def run_notification_cycle(
@@ -233,6 +368,7 @@ def run_notification_cycle(
                         device.subscription(), config, push_title, push_body,
                         config.click_url,
                         expired_handler=expire_device,
+                        urgency="high",
                     )
                     if ok:
                         delivered = True
@@ -328,6 +464,7 @@ def notification_background_worker(
                 sent_cache=sent_cache, attempt_cache=attempt_cache, config=config,
                 now=now, holiday_checker=holiday_checker, kakao_sender=kakao_sender,
             )
+            run_scheduled_push_test_cycle(config=config, now=now)
         except Exception as exc:
             logger.warning("Background worker cycle failed type=%s", type(exc).__name__)
         sleep(30)

@@ -5,8 +5,8 @@ import os
 import json
 import re
 import logging
-import time
 from urllib.parse import urlencode
+from zoneinfo import ZoneInfo
 from demo_support import (prepare_login, consume_login, api_request,
                           deliver_message, message_succeeded, SELECTION_KEYS)
 from datetime import datetime
@@ -20,13 +20,9 @@ from push_subscription_store import (
     PushSubscriptionError,
     mark_subscription_expired,
 )
-from web_push import load_web_push_config, send_web_push
+from web_push import WEB_PUSH_TTL_SECONDS, load_web_push_config, send_web_push
 from web_push_ui import can_send_weather_push, render_web_push_poc
 from user_screen_cache import (
-    ADMIN_ROUTE_SNAPSHOT_CACHE_KEY,
-    CACHE_KEY,
-    CACHE_TTL_SECONDS,
-    ROUTE_CACHE_KEY,
     get_admin_route_snapshot,
     get_user_route_data,
     get_user_screen_data,
@@ -40,6 +36,12 @@ from notification_repository import (
     save_kakao_credentials,
 )
 from notification_worker import start_notification_worker
+from scheduled_push_repository import (
+    ScheduledPushRepositoryError,
+    create_scheduled_push_test,
+    list_scheduled_push_tests,
+    load_push_test_devices,
+)
 from route_repository import (
     RouteConflictError,
     RouteRepositoryError,
@@ -65,41 +67,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-_rerun_start = time.perf_counter()
-_perf_events = []
-_aiven_query_count = 0
-_perf_run_id = 0
-
-
-def perf_log(section, started_at, **fields):
-    elapsed_ms = (time.perf_counter() - started_at) * 1000
-    payload = " ".join(f"{key}={value}" for key, value in fields.items())
-    _perf_events.append((section, elapsed_ms, dict(fields)))
-    print(
-        f"[PERF] run_id={_perf_run_id} section={section} "
-        f"ms={elapsed_ms:.1f} {payload}",
-        flush=True,
-    )
-    return elapsed_ms
-
-
-def fresh_dashboard_cache_hit(session, kakao_user_id):
-    cached = session.get(CACHE_KEY)
-    if not isinstance(cached, dict) or cached.get("kakao_user_id") != kakao_user_id:
-        return False
-    return time.monotonic() - cached.get("_cache_loaded_at", float("-inf")) < CACHE_TTL_SECONDS
-
-
-def count_aiven_query(happened=True):
-    global _aiven_query_count
-    if happened:
-        _aiven_query_count += 1
+KST = ZoneInfo("Asia/Seoul")
 
 st.set_page_config(page_title="AI 셔틀버스 날씨 알림", page_icon="🚌", layout="wide")
 inject_mobile_styles()
-_perf_run_id = st.session_state.get("_perf_run_id", 0) + 1
-st.session_state["_perf_run_id"] = _perf_run_id
 
 def get_env_variable(var_name, default=""):
     """환경 변수를 os.getenv에서 먼저 찾고, 없으면 st.secrets에서 가져옵니다."""
@@ -383,6 +354,133 @@ def render_route_import(region, label, uploader_key, existing_rows):
             except RouteRepositoryError as exc:
                 st.error(str(exc))
 
+
+def render_scheduled_push_test_admin():
+    st.subheader("🧪 예약 Push 테스트")
+    st.caption(
+        "예약 테스트는 기존 Web Push 발송 경로를 사용합니다. "
+        "SUCCESS는 단말 표시 완료가 아니라 Push provider 요청 성공입니다."
+    )
+    admin_actor_id = (
+        st.session_state["user_info"].get("id")
+        if st.session_state["user_info"] else None
+    )
+    if admin_actor_id is None:
+        st.info("예약 Push 테스트는 카카오 로그인된 관리자 계정의 등록 기기를 대상으로 합니다.")
+        return
+
+    try:
+        devices = load_push_test_devices(admin_actor_id)
+        history = list_scheduled_push_tests(admin_actor_id)
+    except ScheduledPushRepositoryError as exc:
+        st.error(str(exc))
+        return
+
+    if not devices:
+        st.info("현재 로그인 사용자에게 등록된 Push 기기가 없습니다.")
+    device_options = {device.id: device.label for device in devices}
+
+    now_kst = datetime.now(KST)
+    with st.form("scheduled_push_test_form"):
+        col_date, col_time = st.columns(2)
+        with col_date:
+            scheduled_date = st.date_input(
+                "발송 예정 날짜 (KST)", value=now_kst.date(), key="admin_push_test_date"
+            )
+        with col_time:
+            scheduled_time = st.time_input(
+                "발송 예정 시간 (KST)",
+                value=now_kst.replace(microsecond=0).time(),
+                key="admin_push_test_time",
+            )
+        urgency = st.selectbox(
+            "Push Urgency",
+            ["normal", "high"],
+            index=0,
+            key="admin_push_test_urgency",
+            help="TTL은 메시지 보관 시간이고, Urgency는 push service 전달 우선순위 힌트입니다.",
+        )
+        target_mode = st.radio(
+            "대상",
+            ["전체 등록 Push 기기", "특정 등록기기"],
+            horizontal=True,
+            key="admin_push_test_target_mode",
+        )
+        selected_device_ids = []
+        if target_mode == "특정 등록기기":
+            selected_device_ids = st.multiselect(
+                "테스트 대상 기기",
+                list(device_options),
+                format_func=lambda device_id: device_options[device_id],
+                key="admin_push_test_device_ids",
+            )
+        message = st.text_area(
+            "테스트 메시지",
+            value="모바일 오프라인 수신 테스트",
+            max_chars=500,
+            key="admin_push_test_message",
+        )
+        st.caption(
+            "입력 후 아래 '예약 등록' 버튼을 눌러야 예약됩니다. "
+            f"TTL은 기존 Web Push와 동일하게 {WEB_PUSH_TTL_SECONDS}초로 고정됩니다."
+        )
+        scheduled_at = datetime.combine(scheduled_date, scheduled_time, tzinfo=KST)
+        disable_schedule = (
+            not devices
+            or not message.strip()
+            or (target_mode == "특정 등록기기" and not selected_device_ids)
+        )
+        schedule_submitted = st.form_submit_button(
+            "예약 등록", type="primary", disabled=disable_schedule
+        )
+
+    if schedule_submitted:
+        if scheduled_at <= datetime.now(KST):
+            st.error("발송 예정 일시는 현재 시각 이후여야 합니다.")
+        else:
+            try:
+                create_scheduled_push_test(
+                    admin_actor_id,
+                    scheduled_at,
+                    message,
+                    urgency,
+                    selected_device_ids if target_mode == "특정 등록기기" else None,
+                )
+            except (ScheduledPushRepositoryError, ValueError) as exc:
+                st.error(str(exc))
+            else:
+                st.success("예약 Push 테스트를 등록했습니다.")
+                st.rerun()
+
+    st.markdown("**예약된 테스트 목록**")
+    if not history:
+        st.info("예약된 Push 테스트가 없습니다.")
+        return
+    history_rows = []
+    for item in history:
+        history_rows.append({
+            "ID": item.id,
+            "예약(KST)": item.scheduled_at.astimezone(KST).strftime("%Y-%m-%d %H:%M:%S"),
+            "상태": item.status,
+            "Urgency": item.urgency,
+            "TTL": f"{item.ttl_seconds}s",
+            "대상": "전체" if item.target_count is None else f"{item.target_count}대",
+            "성공": item.success_count,
+            "실패": item.failed_count,
+            "만료": item.expired_count,
+            "worker 시작": (
+                item.worker_started_at.astimezone(KST).strftime("%H:%M:%S")
+                if item.worker_started_at else "-"
+            ),
+            "provider 요청 완료": (
+                item.send_completed_at.astimezone(KST).strftime("%H:%M:%S")
+                if item.send_completed_at else "-"
+            ),
+            "메시지": item.message,
+        })
+    st.dataframe(pd.DataFrame(history_rows), width="stretch", hide_index=True)
+
+
 def send_worker_kakao(target, title, description):
     """Deliver through Kakao only when the resolved channel is Kakao."""
     try:
@@ -475,22 +573,11 @@ if ("code" in query_params or "error" in query_params) and st.session_state["use
 
 # Load the route source of truth once per Streamlit session.
 route_load_error = None
-route_cache_hit = ROUTE_CACHE_KEY in st.session_state
-_route_started = time.perf_counter()
 try:
     db_data = get_user_route_data(st.session_state)
 except RouteRepositoryError as exc:
     db_data = []
     route_load_error = str(exc)
-finally:
-    count_aiven_query(not route_cache_hit)
-    perf_log(
-        "route_cache",
-        _route_started,
-        cache_hit=route_cache_hit,
-        rows=len(db_data),
-        db_query=not route_cache_hit,
-    )
 
 # Restore only existing choices, before widgets are constructed.
 restored = st.session_state.pop("restored_selection", None)
@@ -596,39 +683,20 @@ sorted_db_data = sorted(
 admin_snapshot = {"rows": [], "identity_map": {}, "snapshots": {}}
 admin_route_error = None
 if admin_management_mode:
-    admin_snapshot_cache_hit = ADMIN_ROUTE_SNAPSHOT_CACHE_KEY in st.session_state
-    _admin_route_started = time.perf_counter()
     try:
         admin_snapshot = get_admin_route_snapshot(st.session_state)
-        count_aiven_query(not admin_snapshot_cache_hit)
     except RouteRepositoryError as exc:
         admin_route_error = str(exc)
-        count_aiven_query(not admin_snapshot_cache_hit)
-    finally:
-        perf_log(
-            "admin_route_snapshot",
-            _admin_route_started,
-            cache_hit=admin_snapshot_cache_hit,
-            rows=len(admin_snapshot["rows"]),
-            db_query=not admin_snapshot_cache_hit,
-        )
 admin_db_data = admin_snapshot["rows"]
 
 admin_container = st.container() if admin_management_mode else None
 main_tab_target = st.container()
-_admin_ui_started = time.perf_counter()
 
 if admin_container is None:
     from weather_advice_preview import reset_preview
     from notification_history_ui import reset_notification_history
     reset_preview()
     reset_notification_history()
-    perf_log(
-        "admin_ui",
-        _admin_ui_started,
-        rendered=False,
-        mode=st.session_state.get("admin_view_mode", "weather"),
-    )
 
 if admin_container is not None:
     with admin_container:
@@ -667,6 +735,8 @@ if admin_container is not None:
                 st.rerun()
         except UserSettingsError as exc:
             st.error(str(exc))
+        st.divider()
+        render_scheduled_push_test_admin()
         st.divider()
         up_tab_gy, up_tab_se = st.tabs(["🟢 경기 지역 업로드", "🔵 서울 지역 업로드"])
         
@@ -763,7 +833,6 @@ if admin_container is not None:
         render_admin_notification_history(
             st.session_state['is_admin'], st.session_state['preview_user']
         )
-    perf_log("admin_ui", _admin_ui_started, rendered=True, rows=len(admin_db_data))
 
 
 def render_login_links():
@@ -781,30 +850,15 @@ def render_login_links():
         login_link.markdown(login_html, unsafe_allow_html=True)
 
 
-def print_rerun_total():
-    print(
-        f"[PERF] run_id={_perf_run_id} section=rerun_total "
-        f"ms={(time.perf_counter() - _rerun_start) * 1000:.1f} "
-        f"aiven_queries={_aiven_query_count} "
-        f"sections={','.join(section for section, _, _ in _perf_events)}",
-        flush=True,
-    )
-
-
 if admin_management_mode:
-    _main_ui_started = time.perf_counter()
-    perf_log("main_ui", _main_ui_started, rendered=False, mode="admin")
     render_login_links()
-    print_rerun_total()
     st.stop()
 
-_main_ui_started = time.perf_counter()
 with main_tab_target:
     st.subheader("🔄 셔틀버스 탑승지 & 하차지 통합 날씨 안내")
     st.write("선택하신 노선의 **탑승 정류장**과 **하차(도착) 정류장**의 날씨를 동시에 조회하여 출퇴근 준비를 완벽하게 도와드립니다.")
     
     if sorted_db_data:
-        _selection_ui_started = time.perf_counter()
         col_r1, col_r2 = st.columns(2)
         with col_r1:
             regions = sorted(list(set(i.get('region', 'gyeonggi') for i in sorted_db_data)))
@@ -896,14 +950,6 @@ with main_tab_target:
         boarding_target = weather_api.resolve_boarding_datetime(board_row.get('arrival_time'))
         weather_selection_key = (sel_region, sel_route, sel_board_stop, sel_arrive_stop,
                                  boarding_target.isoformat() if boarding_target else None)
-        perf_log(
-            "main_selection_ui",
-            _selection_ui_started,
-            region=sel_region,
-            route_count=len(routes),
-            stop_count=len(route_stops),
-            trip_type=trip_type,
-        )
         
         st.markdown("")
         if weather_requested:
@@ -923,28 +969,13 @@ with main_tab_target:
         notification_settings = None
         user_settings_error = None
         if user_id is not None:
-            dashboard_cache_hit = fresh_dashboard_cache_hit(st.session_state, user_id)
-            _dashboard_started = time.perf_counter()
             try:
                 dashboard_data = get_user_screen_data(st.session_state, user_id)
                 notification_settings = dashboard_data["notification_settings"]
                 user_settings = dashboard_data["favorites"]
-                count_aiven_query(not dashboard_cache_hit)
             except (UserSettingsError, ValueError) as exc:
                 user_settings_error = str(exc)
                 st.error(user_settings_error)
-                count_aiven_query(not dashboard_cache_hit)
-            finally:
-                perf_log(
-                    "user_dashboard",
-                    _dashboard_started,
-                    cache_hit=dashboard_cache_hit,
-                    db_query=not dashboard_cache_hit,
-                    favorites=len(user_settings),
-                    logged_in=True,
-                )
-        else:
-            logger.info("[PERF] section=user_dashboard ms=0.0 logged_in=False db_query=False")
         
         if 'w_board' in st.session_state and 'w_arrive' in st.session_state and st.session_state.get('integrated_stop_key') == weather_selection_key:
             wb = st.session_state['w_board']
@@ -1166,12 +1197,6 @@ with main_tab_target:
 
             st.markdown("")
         if st.session_state["user_info"] and not st.session_state["preview_user"]:
-            push_ownership_query = bool(
-                st.session_state.get("web_push_subscription")
-                and st.session_state.get("web_push_db_ownership") == "unknown"
-            )
-            count_aiven_query(push_ownership_query)
-            _push_started = time.perf_counter()
             render_web_push_poc(
                 WEB_PUSH_CONFIG,
                 kakao_user_id=st.session_state["user_info"]["id"],
@@ -1183,19 +1208,10 @@ with main_tab_target:
                     if notification_settings is not None else None
                 ),
             )
-            perf_log(
-                "web_push_ui",
-                _push_started,
-                ownership_query=push_ownership_query,
-                active_count_supplied=notification_settings is not None,
-            )
         elif st.session_state["preview_user"]:
             st.info("일반 사용자 미리보기에서는 기기 알림을 등록할 수 없습니다.")
-            logger.info("[PERF] section=web_push_ui ms=0.0 preview_user=True db_query=False")
         else:
-            _push_started = time.perf_counter()
             render_web_push_poc(WEB_PUSH_CONFIG)
-            perf_log("web_push_ui", _push_started, logged_in=False, db_query=False)
 
         st.markdown("")
         st.subheader("⭐ 내 통합 즐겨찾기 및 알림 설정 목록")
@@ -1268,6 +1284,4 @@ with main_tab_target:
     else:
         st.info("등록된 노선 데이터가 없습니다.")
 
-perf_log("main_ui", _main_ui_started, has_route_data=bool(sorted_db_data))
 render_login_links()
-print_rerun_total()

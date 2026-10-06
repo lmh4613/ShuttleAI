@@ -83,10 +83,22 @@ def valid_click_url(value: str) -> bool:
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
-def build_push_payload(title: str, body: str, click_url: str = "") -> str:
+WEB_PUSH_TTL_SECONDS = 60
+WEB_PUSH_URGENCIES = {"normal", "high"}
+
+
+def build_push_payload(
+    title: str,
+    body: str,
+    click_url: str = "",
+    *,
+    include_received_time: bool = False,
+) -> str:
     payload = {"title": title, "body": body}
     if click_url and valid_click_url(click_url):
         payload["url"] = click_url
+    if include_received_time:
+        payload["include_received_time"] = True
     return json.dumps(payload, ensure_ascii=False)
 
 
@@ -145,10 +157,14 @@ def send_web_push(
     *,
     sender: Callable | None = None,
     expired_handler: Callable[[], None] | None = None,
+    urgency: str | None = None,
+    include_received_time: bool = False,
 ) -> tuple[bool, str]:
     """Send one validated payload without logging subscription secrets."""
     if not config.ready:
         return False, "VAPID 설정이 완료되지 않았습니다."
+    if urgency is not None and urgency not in WEB_PUSH_URGENCIES:
+        return False, "Web Push urgency 설정이 올바르지 않습니다."
 
     try:
         normalized = validate_subscription(subscription)
@@ -161,15 +177,22 @@ def send_web_push(
         sender = webpush
 
     target_url = config.click_url or click_url
+    headers = {"Urgency": urgency} if urgency is not None else None
     try:
-        sender(
+        kwargs = dict(
             subscription_info=normalized,
-            data=build_push_payload(title, body, target_url),
+            data=build_push_payload(
+                title, body, target_url,
+                include_received_time=include_received_time,
+            ),
             vapid_private_key=config.private_key,
             vapid_claims={"sub": config.subject},
-            ttl=60,
+            ttl=WEB_PUSH_TTL_SECONDS,
             timeout=15,
         )
+        if headers is not None:
+            kwargs["headers"] = headers
+        sender(**kwargs)
         return True, "Push 알림을 발송했습니다. 운영체제 알림 영역을 확인해 주세요."
     except Exception as exc:
         status_code = getattr(exc, "status_code", None)
