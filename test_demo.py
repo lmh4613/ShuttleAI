@@ -258,6 +258,11 @@ class AppFlowTests(unittest.TestCase):
         self.assertEqual(len(app.exception), 0)
         return app
 
+    def open_weather_favorites(self, app):
+        app.radio(key="admin_view_mode").set_value("weather").run()
+        self.assertEqual(len(app.exception), 0)
+        return app
+
     def selection_value(self, app, key):
         if key == "user_rt":
             return self.route_value(app)
@@ -333,16 +338,16 @@ class AppFlowTests(unittest.TestCase):
 
     def test_weather_preview_admin_only_and_user_mode_cleanup(self):
         admin = self.login(5070327065)
+        real_selection = self.selection_snapshot(admin)
         self.open_admin_management(admin)
         self.assertTrue(any(e.label == '🧪 날씨 코멘트 테스트' for e in admin.expander))
         self.assertTrue(any(e.label == '🔔 알림 발송 이력' for e in admin.expander))
-        real_selection = self.selection_snapshot(admin)
         with patch('weather_advice_preview.generate_preview', wraps=__import__('weather_advice_preview').generate_preview) as generate:
             admin.selectbox(key='weather_preview_scenario').select('명확한 눈 예보 + 추운 날씨').run()
             self.assertGreater(generate.call_count, 0)
             self.assertEqual(len(admin.exception), 0)
             self.assertTrue(any('눈이 예상됩니다' in i.value for i in admin.info))
-            self.assertEqual(self.selection_snapshot(admin), real_selection)
+            self.assertEqual(admin.session_state["user_rt"], real_selection["user_rt"])
             with patch('weather_comment_ai.generate_once', return_value={
                     'text': '출근길에는 눈이 예상됩니다. 따뜻한 외투를 챙기세요.',
                     'source': 'gemini', 'reason': ''}) as ai:
@@ -436,12 +441,16 @@ class AppFlowTests(unittest.TestCase):
         app = self.login(5070327065)
         snapshot_loader = self.route_mocks["load_admin_route_snapshot"]
         self.assertEqual(snapshot_loader.call_count, 0)
+        self.assertFalse(any(item.key == "admin_global_notification_policy" for item in app.selectbox))
         app.selectbox(key="user_reg").select("gyeonggi").run()
         self.assertEqual(snapshot_loader.call_count, 0)
         self.open_admin_management(app)
         self.assertEqual(snapshot_loader.call_count, 1)
-        app.selectbox(key="user_reg").select("gyeonggi").run()
+        self.assertFalse(any(item.key == "user_reg" for item in app.selectbox))
+        self.assertFalse(any("셔틀버스 탑승지" in item.value for item in app.subheader))
+        self.open_weather_favorites(app)
         self.assertEqual(snapshot_loader.call_count, 1)
+        self.assertTrue(any(item.key == "user_reg" for item in app.selectbox))
 
     def test_admin_grid_saves_to_aiven_without_writing_route_json(self):
         before = Path("routes_db.json").read_bytes()

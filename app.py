@@ -765,6 +765,39 @@ if admin_container is not None:
         )
     perf_log("admin_ui", _admin_ui_started, rendered=True, rows=len(admin_db_data))
 
+
+def render_login_links():
+    # Render after selectors in user mode, so OAuth snapshots current choices.
+    if not login_links:
+        return
+    state = prepare_login(st.session_state.get("oauth_state"), st.session_state)
+    st.session_state["oauth_state"] = state
+    login_url = "https://kauth.kakao.com/oauth/authorize?" + urlencode({
+        "client_id": KAKAO_CLIENT_ID, "redirect_uri": KAKAO_REDIRECT_URI,
+        "response_type": "code", "state": state,
+    })
+    login_html = f'<a href="{login_url}" target="_self" style="display:block;text-align:center;background:#FEE500;color:#000;padding:10px;border-radius:5px;text-decoration:none;font-weight:bold">💬 카카오계정으로 로그인</a>'
+    for login_link in login_links:
+        login_link.markdown(login_html, unsafe_allow_html=True)
+
+
+def print_rerun_total():
+    print(
+        f"[PERF] run_id={_perf_run_id} section=rerun_total "
+        f"ms={(time.perf_counter() - _rerun_start) * 1000:.1f} "
+        f"aiven_queries={_aiven_query_count} "
+        f"sections={','.join(section for section, _, _ in _perf_events)}",
+        flush=True,
+    )
+
+
+if admin_management_mode:
+    _main_ui_started = time.perf_counter()
+    perf_log("main_ui", _main_ui_started, rendered=False, mode="admin")
+    render_login_links()
+    print_rerun_total()
+    st.stop()
+
 _main_ui_started = time.perf_counter()
 with main_tab_target:
     st.subheader("🔄 셔틀버스 탑승지 & 하차지 통합 날씨 안내")
@@ -1236,23 +1269,5 @@ with main_tab_target:
         st.info("등록된 노선 데이터가 없습니다.")
 
 perf_log("main_ui", _main_ui_started, has_route_data=bool(sorted_db_data))
-
-# Render after the selectors, so OAuth always snapshots the current choices.
-if login_links:
-    state = prepare_login(st.session_state.get("oauth_state"), st.session_state)
-    st.session_state["oauth_state"] = state
-    login_url = "https://kauth.kakao.com/oauth/authorize?" + urlencode({
-        "client_id": KAKAO_CLIENT_ID, "redirect_uri": KAKAO_REDIRECT_URI,
-        "response_type": "code", "state": state,
-    })
-    login_html = f'<a href="{login_url}" target="_self" style="display:block;text-align:center;background:#FEE500;color:#000;padding:10px;border-radius:5px;text-decoration:none;font-weight:bold">💬 카카오계정으로 로그인</a>'
-    for login_link in login_links:
-        login_link.markdown(login_html, unsafe_allow_html=True)
-
-print(
-    f"[PERF] run_id={_perf_run_id} section=rerun_total "
-    f"ms={(time.perf_counter() - _rerun_start) * 1000:.1f} "
-    f"aiven_queries={_aiven_query_count} "
-    f"sections={','.join(section for section, _, _ in _perf_events)}",
-    flush=True,
-)
+render_login_links()
+print_rerun_total()
