@@ -5,6 +5,7 @@ import os
 import json
 import re
 import logging
+import time
 from urllib.parse import urlencode
 from demo_support import (prepare_login, consume_login, api_request,
                           deliver_message, message_succeeded, SELECTION_KEYS)
@@ -22,6 +23,9 @@ from push_subscription_store import (
 from web_push import load_web_push_config, send_web_push
 from web_push_ui import can_send_weather_push, render_web_push_poc
 from user_screen_cache import (
+    CACHE_KEY,
+    CACHE_TTL_SECONDS,
+    ROUTE_CACHE_KEY,
     get_user_route_data,
     get_user_screen_data,
     invalidate_user_route_data,
@@ -59,6 +63,30 @@ from dotenv import load_dotenv
 
 load_dotenv()
 logger = logging.getLogger(__name__)
+_rerun_start = time.perf_counter()
+_perf_events = []
+_aiven_query_count = 0
+
+
+def perf_log(section, started_at, **fields):
+    elapsed_ms = (time.perf_counter() - started_at) * 1000
+    payload = " ".join(f"{key}={value}" for key, value in fields.items())
+    _perf_events.append((section, elapsed_ms, dict(fields)))
+    logger.info("[PERF] section=%s ms=%.1f %s", section, elapsed_ms, payload)
+    return elapsed_ms
+
+
+def fresh_dashboard_cache_hit(session, kakao_user_id):
+    cached = session.get(CACHE_KEY)
+    if not isinstance(cached, dict) or cached.get("kakao_user_id") != kakao_user_id:
+        return False
+    return time.monotonic() - cached.get("_cache_loaded_at", float("-inf")) < CACHE_TTL_SECONDS
+
+
+def count_aiven_query(happened=True):
+    global _aiven_query_count
+    if happened:
+        _aiven_query_count += 1
 
 st.set_page_config(page_title="AI 셔틀버스 날씨 알림", page_icon="🚌", layout="wide")
 inject_mobile_styles()
@@ -436,11 +464,22 @@ if ("code" in query_params or "error" in query_params) and st.session_state["use
 
 # Load the route source of truth once per Streamlit session.
 route_load_error = None
+route_cache_hit = ROUTE_CACHE_KEY in st.session_state
+_route_started = time.perf_counter()
 try:
     db_data = get_user_route_data(st.session_state)
 except RouteRepositoryError as exc:
     db_data = []
     route_load_error = str(exc)
+finally:
+    count_aiven_query(not route_cache_hit)
+    perf_log(
+        "route_cache",
+        _route_started,
+        cache_hit=route_cache_hit,
+        rows=len(db_data),
+        db_query=not route_cache_hit,
+    )
 
 # Restore only existing choices, before widgets are constructed.
 restored = st.session_state.pop("restored_selection", None)
@@ -531,10 +570,19 @@ sorted_db_data = sorted(
 admin_snapshot = {"rows": [], "identity_map": {}, "snapshots": {}}
 admin_route_error = None
 if st.session_state["is_admin"] and not st.session_state["preview_user"]:
+    _admin_route_started = time.perf_counter()
+    count_aiven_query()
     try:
         admin_snapshot = load_admin_route_snapshot()
     except RouteRepositoryError as exc:
         admin_route_error = str(exc)
+    finally:
+        perf_log(
+            "admin_route_snapshot",
+            _admin_route_started,
+            rows=len(admin_snapshot["rows"]),
+            db_query=True,
+        )
 admin_db_data = admin_snapshot["rows"]
 
 if st.session_state["is_admin"] and not st.session_state["preview_user"]:
@@ -682,11 +730,13 @@ if tab1 is not None:
         )
 
 main_tab_target = tab2 if tab1 is not None else tab2
+_main_ui_started = time.perf_counter()
 with main_tab_target:
     st.subheader("🔄 셔틀버스 탑승지 & 하차지 통합 날씨 안내")
     st.write("선택하신 노선의 **탑승 정류장**과 **하차(도착) 정류장**의 날씨를 동시에 조회하여 출퇴근 준비를 완벽하게 도와드립니다.")
     
     if sorted_db_data:
+        _selection_ui_started = time.perf_counter()
         col_r1, col_r2 = st.columns(2)
         with col_r1:
             regions = sorted(list(set(i.get('region', 'gyeonggi') for i in sorted_db_data)))
@@ -717,29 +767,44 @@ with main_tab_target:
         st.session_state["_stop_route_context"] = route_context
         
         st.markdown("---")
-        col_s1, col_s2 = st.columns(2)
-        with col_s1:
-            st.markdown("🟢 **[1] 내 탑승 정류장 선택**")
-            if is_leave:
-                first_stop = stops[0] if stops else "정류장 없음"
-                st.session_state["user_board_st"] = first_stop
-                sel_board_stop = st.selectbox("탑승 정류장", [first_stop], key="user_board_st", disabled=True)
-            else:
-                if st.session_state.get("user_board_st") not in boarding_options:
-                    st.session_state.pop("user_board_st", None)
-                sel_board_stop = st.selectbox("탑승 정류장", boarding_options, key="user_board_st")
-        
-        with col_s2:
-            st.markdown("🔴 **[2] 내 하차(도착) 정류장 선택**")
-            if is_leave:
-                if st.session_state.get("user_arrive_st") not in stops:
-                    st.session_state.pop("user_arrive_st", None)
-                default_arrive_idx = 0 if "user_arrive_st" in st.session_state else max(len(stops) - 1, 0)
-                sel_arrive_stop = st.selectbox("하차 정류장 (도착지)", stops if stops else ["정류장 없음"], index=default_arrive_idx, key="user_arrive_st")
-            else:
-                if st.session_state.get("user_arrive_st_fixed") not in arrival_options:
-                    st.session_state.pop("user_arrive_st_fixed", None)
-                sel_arrive_stop = st.selectbox("하차 정류장 (도착지)", arrival_options, key="user_arrive_st_fixed")
+        with st.form("stop_weather_form"):
+            col_s1, col_s2 = st.columns(2)
+            with col_s1:
+                st.markdown("🟢 **[1] 내 탑승 정류장 선택**")
+                if is_leave:
+                    first_stop = stops[0] if stops else "정류장 없음"
+                    st.session_state["user_board_st"] = first_stop
+                    sel_board_stop = st.selectbox(
+                        "탑승 정류장", [first_stop],
+                        key="user_board_st", disabled=True,
+                    )
+                else:
+                    if st.session_state.get("user_board_st") not in boarding_options:
+                        st.session_state.pop("user_board_st", None)
+                    sel_board_stop = st.selectbox(
+                        "탑승 정류장", boarding_options, key="user_board_st"
+                    )
+
+            with col_s2:
+                st.markdown("🔴 **[2] 내 하차(도착) 정류장 선택**")
+                if is_leave:
+                    if st.session_state.get("user_arrive_st") not in stops:
+                        st.session_state.pop("user_arrive_st", None)
+                    default_arrive_idx = 0 if "user_arrive_st" in st.session_state else max(len(stops) - 1, 0)
+                    sel_arrive_stop = st.selectbox(
+                        "하차 정류장 (도착지)", stops if stops else ["정류장 없음"],
+                        index=default_arrive_idx, key="user_arrive_st",
+                    )
+                else:
+                    if st.session_state.get("user_arrive_st_fixed") not in arrival_options:
+                        st.session_state.pop("user_arrive_st_fixed", None)
+                    sel_arrive_stop = st.selectbox(
+                        "하차 정류장 (도착지)", arrival_options,
+                        key="user_arrive_st_fixed",
+                    )
+            weather_requested = st.form_submit_button(
+                "🔍 탑승·하차 통합 날씨 조회", type="primary", width='stretch'
+            )
         
         board_row = next((i for i in route_stops if i.get('stop_name') == sel_board_stop), {})
         
@@ -763,9 +828,17 @@ with main_tab_target:
         boarding_target = weather_api.resolve_boarding_datetime(board_row.get('arrival_time'))
         weather_selection_key = (sel_region, sel_route, sel_board_stop, sel_arrive_stop,
                                  boarding_target.isoformat() if boarding_target else None)
+        perf_log(
+            "main_selection_ui",
+            _selection_ui_started,
+            region=sel_region,
+            route_count=len(routes),
+            stop_count=len(route_stops),
+            trip_type=trip_type,
+        )
         
         st.markdown("")
-        if st.button("🔍 탑승·하차 통합 날씨 조회", type="primary", width='stretch'):
+        if weather_requested:
             with st.spinner("탑승지와 하차지의 기상청 날씨 및 AI 통합 코멘트 생성 중..."):
                 w_board = weather_api.get_weather_forecast_by_coords(board_lat, board_lon, stop_name=sel_board_stop, trip_type=trip_type, target_datetime=boarding_target, location="boarding")
                 w_arrive = weather_api.get_weather_forecast_by_coords(arrive_lat, arrive_lon, stop_name=sel_arrive_stop, trip_type=trip_type, target_datetime=boarding_target, location="destination")
@@ -782,13 +855,28 @@ with main_tab_target:
         notification_settings = None
         user_settings_error = None
         if user_id is not None:
+            dashboard_cache_hit = fresh_dashboard_cache_hit(st.session_state, user_id)
+            _dashboard_started = time.perf_counter()
             try:
                 dashboard_data = get_user_screen_data(st.session_state, user_id)
                 notification_settings = dashboard_data["notification_settings"]
                 user_settings = dashboard_data["favorites"]
+                count_aiven_query(not dashboard_cache_hit)
             except (UserSettingsError, ValueError) as exc:
                 user_settings_error = str(exc)
                 st.error(user_settings_error)
+                count_aiven_query(not dashboard_cache_hit)
+            finally:
+                perf_log(
+                    "user_dashboard",
+                    _dashboard_started,
+                    cache_hit=dashboard_cache_hit,
+                    db_query=not dashboard_cache_hit,
+                    favorites=len(user_settings),
+                    logged_in=True,
+                )
+        else:
+            logger.info("[PERF] section=user_dashboard ms=0.0 logged_in=False db_query=False")
         
         if 'w_board' in st.session_state and 'w_arrive' in st.session_state and st.session_state.get('integrated_stop_key') == weather_selection_key:
             wb = st.session_state['w_board']
@@ -1010,6 +1098,12 @@ with main_tab_target:
 
             st.markdown("")
         if st.session_state["user_info"] and not st.session_state["preview_user"]:
+            push_ownership_query = bool(
+                st.session_state.get("web_push_subscription")
+                and st.session_state.get("web_push_db_ownership") == "unknown"
+            )
+            count_aiven_query(push_ownership_query)
+            _push_started = time.perf_counter()
             render_web_push_poc(
                 WEB_PUSH_CONFIG,
                 kakao_user_id=st.session_state["user_info"]["id"],
@@ -1021,10 +1115,19 @@ with main_tab_target:
                     if notification_settings is not None else None
                 ),
             )
+            perf_log(
+                "web_push_ui",
+                _push_started,
+                ownership_query=push_ownership_query,
+                active_count_supplied=notification_settings is not None,
+            )
         elif st.session_state["preview_user"]:
             st.info("일반 사용자 미리보기에서는 기기 알림을 등록할 수 없습니다.")
+            logger.info("[PERF] section=web_push_ui ms=0.0 preview_user=True db_query=False")
         else:
+            _push_started = time.perf_counter()
             render_web_push_poc(WEB_PUSH_CONFIG)
+            perf_log("web_push_ui", _push_started, logged_in=False, db_query=False)
 
         st.markdown("")
         st.subheader("⭐ 내 통합 즐겨찾기 및 알림 설정 목록")
@@ -1097,6 +1200,8 @@ with main_tab_target:
     else:
         st.info("등록된 노선 데이터가 없습니다.")
 
+perf_log("main_ui", _main_ui_started, has_route_data=bool(sorted_db_data))
+
 # Render after the selectors, so OAuth always snapshots the current choices.
 if login_links:
     state = prepare_login(st.session_state.get("oauth_state"), st.session_state)
@@ -1108,3 +1213,10 @@ if login_links:
     login_html = f'<a href="{login_url}" target="_self" style="display:block;text-align:center;background:#FEE500;color:#000;padding:10px;border-radius:5px;text-decoration:none;font-weight:bold">💬 카카오계정으로 로그인</a>'
     for login_link in login_links:
         login_link.markdown(login_html, unsafe_allow_html=True)
+
+logger.info(
+    "[PERF] section=rerun_total ms=%.1f aiven_queries=%s sections=%s",
+    (time.perf_counter() - _rerun_start) * 1000,
+    _aiven_query_count,
+    ",".join(section for section, _, _ in _perf_events),
+)
