@@ -7,6 +7,7 @@ import time
 
 
 CACHE_KEY = "_user_screen_dashboard_cache"
+ROUTE_CACHE_KEY = "_user_screen_route_cache"
 CACHE_TTL_SECONDS = 300
 
 
@@ -45,4 +46,28 @@ def invalidate_user_screen_data(
     if kakao_user_id is not None and cached.get("kakao_user_id") != kakao_user_id:
         return False
     del session[CACHE_KEY]
+    return True
+
+
+def get_user_route_data(
+    session: MutableMapping,
+    *,
+    loader: Callable | None = None,
+) -> list[dict]:
+    """Return route rows once per Streamlit session for ordinary-user filtering."""
+    cached = session.get(ROUTE_CACHE_KEY)
+    if isinstance(cached, list):
+        return cached
+    if loader is None:
+        from route_repository import load_routes_for_ui
+        loader = load_routes_for_ui
+    loaded = list(loader())
+    session[ROUTE_CACHE_KEY] = loaded
+    return loaded
+
+
+def invalidate_user_route_data(session: MutableMapping) -> bool:
+    if ROUTE_CACHE_KEY not in session:
+        return False
+    del session[ROUTE_CACHE_KEY]
     return True

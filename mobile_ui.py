@@ -73,6 +73,28 @@ def mobile_css():
             border-radius: 0.65rem;
         }
 
+        .st-key-mobile_weather_result [data-testid="stMetric"] {
+            padding: 0.45rem 0.6rem;
+        }
+
+        .st-key-mobile_weather_result [data-testid="stMetricLabel"] {
+            font-size: 0.78rem;
+        }
+
+        .st-key-mobile_weather_result [data-testid="stMetricValue"] {
+            font-size: 1rem;
+        }
+
+        .st-key-mobile_weather_result h3 {
+            font-size: 1rem;
+            margin-bottom: 0.3rem;
+        }
+
+        .st-key-mobile_weather_result h4 {
+            font-size: 0.92rem;
+            margin-bottom: 0.25rem;
+        }
+
         .st-key-mobile_weekdays [data-testid="stHorizontalBlock"] {
             display: grid;
             grid-template-columns: repeat(4, minmax(0, 1fr));

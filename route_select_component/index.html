@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: "Source Sans Pro", sans-serif;
+    }
+
+    html,
+    body {
+      margin: 0;
+      padding: 0;
+      background: transparent;
+      color: inherit;
+      overflow: hidden;
+    }
+
+    .field {
+      display: flex;
+      flex-direction: column;
+      gap: 0.35rem;
+      width: 100%;
+      box-sizing: border-box;
+      padding: 0;
+    }
+
+    label {
+      font-size: 0.875rem;
+      font-weight: 400;
+      line-height: 1.25;
+      color: rgba(49, 51, 63, 0.9);
+    }
+
+    .select-wrap {
+      position: relative;
+      width: 100%;
+    }
+
+    select {
+      width: 100%;
+      min-height: 2.5rem;
+      box-sizing: border-box;
+      appearance: none;
+      -webkit-appearance: none;
+      border: 1px solid rgba(49, 51, 63, 0.2);
+      border-radius: 0.5rem;
+      background: rgb(255, 255, 255);
+      color: rgb(49, 51, 63);
+      font: inherit;
+      font-size: 1rem;
+      line-height: 1.5;
+      padding: 0.45rem 2.25rem 0.45rem 0.75rem;
+      outline: none;
+    }
+
+    select:focus {
+      border-color: rgb(255, 75, 75);
+      box-shadow: 0 0 0 1px rgb(255, 75, 75);
+    }
+
+    .arrow {
+      pointer-events: none;
+      position: absolute;
+      right: 0.75rem;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 0;
+      height: 0;
+      border-left: 0.32rem solid transparent;
+      border-right: 0.32rem solid transparent;
+      border-top: 0.38rem solid rgba(49, 51, 63, 0.7);
+    }
+
+    @media (prefers-color-scheme: dark) {
+      label {
+        color: rgba(250, 250, 250, 0.9);
+      }
+
+      select {
+        background: rgb(38, 39, 48);
+        border-color: rgba(250, 250, 250, 0.2);
+        color: rgb(250, 250, 250);
+      }
+
+      .arrow {
+        border-top-color: rgba(250, 250, 250, 0.75);
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="field">
+    <label id="route-label" for="route-select">노선 선택</label>
+    <div class="select-wrap">
+      <select id="route-select" aria-labelledby="route-label"></select>
+      <span class="arrow" aria-hidden="true"></span>
+    </div>
+  </div>
+
+  <script>
+    const select = document.getElementById("route-select");
+    const label = document.getElementById("route-label");
+    let currentValue = "";
+
+    function send(type, data) {
+      window.parent.postMessage(
+        Object.assign({ isStreamlitMessage: true, type }, data || {}),
+        "*"
+      );
+    }
+
+    function setFrameHeight() {
+      send("streamlit:setFrameHeight", { height: document.body.scrollHeight });
+    }
+
+    function setComponentValue(value) {
+      send("streamlit:setComponentValue", { value });
+    }
+
+    function render(args) {
+      const options = Array.isArray(args.options) ? args.options : [];
+      currentValue = options.includes(args.value) ? args.value : (options[0] || "");
+      label.textContent = args.label || "노선 선택";
+      select.innerHTML = "";
+      for (const optionValue of options) {
+        const option = document.createElement("option");
+        option.value = optionValue;
+        option.textContent = optionValue;
+        option.selected = optionValue === currentValue;
+        select.appendChild(option);
+      }
+      setFrameHeight();
+    }
+
+    select.addEventListener("change", () => {
+      if (select.value !== currentValue) {
+        currentValue = select.value;
+        setComponentValue(currentValue);
+      }
+    });
+
+    window.addEventListener("message", (event) => {
+      const data = event.data || {};
+      if (data.type === "streamlit:render") {
+        render(data.args || {});
+      }
+    });
+
+    send("streamlit:componentReady", { apiVersion: 1 });
+    setFrameHeight();
+  </script>
+</body>
+</html>

@@ -2,7 +2,10 @@ from unittest.mock import Mock
 
 from user_screen_cache import (
     CACHE_KEY,
+    ROUTE_CACHE_KEY,
     get_user_screen_data,
+    get_user_route_data,
+    invalidate_user_route_data,
     invalidate_user_screen_data,
 )
 
@@ -52,3 +55,35 @@ def test_cache_ttl_prevents_indefinite_staleness():
     assert loader.call_count == 1
     get_user_screen_data(session, 101, loader=loader, clock=lambda: 310)
     assert loader.call_count == 2
+
+
+def test_route_cache_miss_then_selection_reruns_reuse_memory_rows():
+    session = {}
+    rows = [{"region": "gyeonggi", "route_name": "(출근) A", "stop_name": "정류장"}]
+    loader = Mock(return_value=rows)
+
+    first = get_user_route_data(session, loader=loader)
+    session["user_reg"] = "seoul"
+    session["user_rt"] = "(출근) B"
+    second = get_user_route_data(session, loader=loader)
+
+    assert first is second
+    assert session[ROUTE_CACHE_KEY] is first
+    loader.assert_called_once_with()
+
+
+def test_route_cache_invalidates_only_when_explicitly_requested():
+    session = {}
+    loader = Mock(side_effect=[
+        [{"route_name": "(출근) A"}],
+        [{"route_name": "(출근) B"}],
+    ])
+
+    assert get_user_route_data(session, loader=loader)[0]["route_name"] == "(출근) A"
+    assert invalidate_user_route_data(session)
+    assert get_user_route_data(session, loader=loader)[0]["route_name"] == "(출근) B"
+    assert loader.call_count == 2
+
+
+def test_route_cache_invalidate_returns_false_when_empty():
+    assert not invalidate_user_route_data({})
