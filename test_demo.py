@@ -246,12 +246,21 @@ class AppFlowTests(unittest.TestCase):
         self.assertEqual(len(app.exception), 0)
         return app
 
-    def route_selector(self, app):
-        return app.radio(key="user_rt")
+    def route_value(self, app):
+        return app.session_state["user_rt"]
+
+    def select_route(self, app, route_name):
+        route_buttons = [
+            button for button in app.button
+            if button.key and button.key.startswith("user_rt_option_")
+            and button.label == route_name
+        ]
+        self.assertEqual(len(route_buttons), 1)
+        return route_buttons[0].click().run()
 
     def selection_value(self, app, key):
         if key == "user_rt":
-            return self.route_selector(app).value
+            return self.route_value(app)
         return app.selectbox(key=key).value
 
     def selection_snapshot(self, app):
@@ -267,7 +276,13 @@ class AppFlowTests(unittest.TestCase):
         self.assertEqual(len(app.selectbox(key="user_board_st").options), 1)
         self.assertFalse(app.session_state["is_admin"])
         self.assertEqual(app.selectbox(key="user_reg").value, "seoul")
-        self.assertEqual(self.route_selector(app).value, "(퇴근) 노원")
+        self.assertEqual(self.route_value(app), "(퇴근) 노원")
+        self.assertFalse(any(item.key == "user_rt" for item in app.radio))
+        self.assertTrue(any(
+            button.key and button.key.startswith("user_rt_option_")
+            and button.label == "(퇴근) 노원"
+            for button in app.button
+        ))
         self.assertEqual(len(app.tabs), 1)
         next(b for b in app.button if b.label == "⭐ 통합 즐겨찾기 추가").click().run()
         self.assertEqual(len(app.exception), 0)
@@ -355,7 +370,7 @@ class AppFlowTests(unittest.TestCase):
                                             ('출근 테스트', 'E (하차만)', 37.4)]]
         with patch.object(route_repository, 'load_routes_for_ui', return_value=fixtures):
             app = self.login(12345)
-            self.route_selector(app).set_value('출근 테스트').run()
+            self.select_route(app, '출근 테스트')
             self.assertEqual(len(app.exception), 0)
             self.assertEqual(app.selectbox(key='user_arrive_st_fixed').value, '판교 제2테크노밸리')
             self.assertEqual(app.selectbox(key='user_board_st').options, ['탑승A'])
@@ -517,7 +532,7 @@ class AppFlowTests(unittest.TestCase):
                                         ('(퇴근) A', '(퇴근) B'),
                                         ('(퇴근) B', '출근 A')]:
                 with self.subTest(source=source, destination=destination):
-                    self.route_selector(app).set_value(source).run()
+                    self.select_route(app, source)
                     if '퇴근' in source:
                         app.selectbox(key='user_arrive_st').select('공통 하차').run()
                     else:
@@ -527,7 +542,7 @@ class AppFlowTests(unittest.TestCase):
                         app.run()
                         self.assertEqual(app.selectbox(key='user_board_st').value, '공통 탑승')
                         self.assertEqual(app.selectbox(key='user_arrive_st_fixed').value, '공통 (하차만)')
-                    self.route_selector(app).set_value(destination).run()
+                    self.select_route(app, destination)
                     self.assertEqual(len(app.exception), 0)
                     self.assertEqual(app.selectbox(key='user_board_st').value, routes[destination][0])
                     self.assertEqual(app.selectbox(key='user_board_st').disabled, '퇴근' in destination)

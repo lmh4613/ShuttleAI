@@ -208,13 +208,21 @@ def route_stop_options(stops, is_leave):
     return boarding or ["정류장 없음"], arrival
 
 
-def non_searching_list_select(label, options, *, key):
-    """Render a keyboard-free list selector for mobile route changes."""
+def collapsed_route_select(label, options, *, key):
+    """Render a collapsed, keyboard-free route selector."""
     choices = list(options) or ["노선 없음"]
     current = st.session_state.get(key)
     if current not in choices:
         st.session_state[key] = choices[0]
-    return st.radio(label, choices, key=key)
+        current = choices[0]
+    st.markdown(f"**{label}**")
+    with st.popover(current, icon=":material/keyboard_arrow_down:", width="stretch",
+                    key=f"{key}_popover"):
+        for index, choice in enumerate(choices):
+            if st.button(choice, key=f"{key}_option_{index}", width="stretch"):
+                st.session_state[key] = choice
+                st.rerun()
+    return st.session_state[key]
 
 
 def render_reconcile_preview(preview, *, region):
@@ -705,7 +713,7 @@ with main_tab_target:
         routes = list(dict.fromkeys(i.get('route_name') for i in reg_filtered if i.get('route_name')))
         
         with col_r2:
-            sel_route = non_searching_list_select("노선 선택", routes, key="user_rt")
+            sel_route = collapsed_route_select("노선 선택", routes, key="user_rt")
         
         route_stops = [i for i in reg_filtered if i.get('route_name') == sel_route]
         stops = [i.get('stop_name') for i in route_stops] if route_stops else []
