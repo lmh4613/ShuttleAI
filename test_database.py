@@ -141,7 +141,16 @@ def test_project_migrations_keep_existing_versions_and_add_route_lifecycle_in_or
         ("003", "notification_history"),
         ("004", "route_lifecycle"),
         ("005", "scheduled_push_tests"),
+        ("006", "user_nickname_account_lifecycle"),
     ]
+
+
+def test_user_nickname_account_lifecycle_migration_is_additive():
+    sql = Path("migrations/006_user_nickname_account_lifecycle.sql").read_text("utf-8")
+    assert "ALTER TABLE users" in sql
+    assert "ADD COLUMN IF NOT EXISTS nickname TEXT" in sql
+    assert "DROP" not in sql.upper()
+    assert "DELETE" not in sql.upper()
 
 
 def test_notification_history_migration_has_atomic_identity_and_no_message_content():
