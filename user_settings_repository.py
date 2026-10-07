@@ -7,11 +7,14 @@ from collections.abc import Callable, Iterable, Mapping
 from decimal import Decimal, InvalidOperation
 
 from database import database_connection, database_transaction
+from token_crypto import encrypt_token
 
 
 logger = logging.getLogger(__name__)
 CHANNELS = {"PUSH", "KAKAO"}
 GLOBAL_POLICIES = {"AUTO", "PUSH", "KAKAO"}
+DEFAULT_TIMEZONE = "Asia/Seoul"
+DEFAULT_ACTIVE_DAYS = (0, 1, 2, 3, 4)
 
 
 class UserSettingsError(RuntimeError):
@@ -52,6 +55,110 @@ def _user_row(cursor, kakao_user_id: int):
     if row is None:
         raise UserNotFoundError("등록된 사용자를 찾을 수 없습니다. 다시 로그인해 주세요.")
     return row
+
+
+def sync_existing_login_user(
+    kakao_user_id: int,
+    *,
+    nickname: str | None,
+    access_token: str,
+    refresh_token: str | None,
+    transaction_factory: Callable = database_transaction,
+) -> dict | None:
+    """Refresh an existing user's login metadata; re-enable soft-deleted users."""
+    normalized_nickname = nickname if isinstance(nickname, str) and nickname.strip() else None
+    try:
+        with transaction_factory() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT id, enabled FROM users WHERE kakao_user_id=%s",
+                    (kakao_user_id,),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    return None
+                user_id, was_enabled = row
+                cursor.execute(
+                    "UPDATE users SET enabled=TRUE, nickname=%s, last_login_at=now() "
+                    "WHERE id=%s",
+                    (normalized_nickname, user_id),
+                )
+                cursor.execute(
+                    "INSERT INTO notification_settings "
+                    "(user_id, exclude_holidays, timezone, delivery_channel) "
+                    "VALUES (%s, TRUE, %s, 'KAKAO') "
+                    "ON CONFLICT (user_id) DO NOTHING",
+                    (user_id, DEFAULT_TIMEZONE),
+                )
+                cursor.execute(
+                    "SELECT 1 FROM notification_active_days WHERE user_id=%s LIMIT 1",
+                    (user_id,),
+                )
+                if cursor.fetchone() is None:
+                    cursor.executemany(
+                        "INSERT INTO notification_active_days (user_id, weekday) "
+                        "VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                        [(user_id, day) for day in DEFAULT_ACTIVE_DAYS],
+                    )
+                cursor.execute(
+                    "INSERT INTO kakao_credentials "
+                    "(user_id, access_token_ciphertext, refresh_token_ciphertext, "
+                    "token_updated_at) VALUES (%s, %s, %s, now()) "
+                    "ON CONFLICT (user_id) DO UPDATE SET "
+                    "access_token_ciphertext=EXCLUDED.access_token_ciphertext, "
+                    "refresh_token_ciphertext=COALESCE("
+                    "EXCLUDED.refresh_token_ciphertext, "
+                    "kakao_credentials.refresh_token_ciphertext), "
+                    "token_updated_at=now()",
+                    (
+                        user_id,
+                        encrypt_token(access_token),
+                        encrypt_token(refresh_token),
+                    ),
+                )
+        return {"user_id": user_id, "reactivated": not was_enabled}
+    except Exception as exc:
+        raise _db_error("login sync", exc) from None
+
+
+def deactivate_user_account(
+    kakao_user_id: int,
+    *,
+    transaction_factory: Callable = database_transaction,
+) -> None:
+    """Soft-delete one enabled user and disable all active notification surfaces."""
+    try:
+        with transaction_factory() as connection:
+            with connection.cursor() as cursor:
+                user_id, _role = _user_row(cursor, kakao_user_id)
+                cursor.execute(
+                    "UPDATE users SET enabled=FALSE WHERE id=%s",
+                    (user_id,),
+                )
+                cursor.execute(
+                    "UPDATE favorite_notifications fn SET enabled=FALSE "
+                    "FROM favorites f WHERE f.id=fn.favorite_id AND f.user_id=%s",
+                    (user_id,),
+                )
+                cursor.execute(
+                    "UPDATE favorites SET active=FALSE WHERE user_id=%s",
+                    (user_id,),
+                )
+                cursor.execute(
+                    "UPDATE push_subscriptions SET enabled=FALSE, revoked_at=now() "
+                    "WHERE user_id=%s AND enabled=TRUE AND revoked_at IS NULL",
+                    (user_id,),
+                )
+                cursor.execute(
+                    "UPDATE kakao_credentials SET access_token_ciphertext=NULL, "
+                    "refresh_token_ciphertext=NULL, token_updated_at=now() "
+                    "WHERE user_id=%s",
+                    (user_id,),
+                )
+    except UserSettingsError:
+        raise
+    except Exception as exc:
+        raise _db_error("account deactivate", exc) from None
 
 
 def get_notification_settings(

@@ -241,6 +241,8 @@ class AppFlowTests(unittest.TestCase):
             "update_notification_settings": update_notification,
             "get_global_notification_policy": lambda: "AUTO",
             "update_global_notification_policy": Mock(),
+            "sync_existing_login_user": Mock(return_value={"user_id": 11, "reactivated": False}),
+            "deactivate_user_account": Mock(),
         }
         self.repository_patchers = [
             patch(f"user_settings_repository.{name}", side_effect=value)
@@ -357,6 +359,26 @@ class AppFlowTests(unittest.TestCase):
         self.assertGreaterEqual(
             len([button for button in logged_in.button if button.label == "로그아웃"]), 2
         )
+
+    def test_login_syncs_existing_user_nickname_without_provisioning_new_user(self):
+        app = self.login(12345)
+        self.assertEqual(len(app.exception), 0)
+        self.repository_mocks["sync_existing_login_user"].assert_called_once_with(
+            12345, nickname="테스트", access_token="test", refresh_token="test-refresh"
+        )
+        data = json.loads(Path(self.data_file).read_text(encoding="utf-8"))["12345"]
+        self.assertEqual(data["access_token"], "test")
+        self.assertEqual(data["refresh_token"], "test-refresh")
+
+    def test_account_withdrawal_requires_confirmation_and_ends_session(self):
+        app = self.login(12345)
+        withdrawal = next(b for b in app.button if b.label == "회원 탈퇴")
+        self.assertTrue(withdrawal.disabled)
+        app.checkbox(key="confirm_account_withdrawal").check().run()
+        next(b for b in app.button if b.label == "회원 탈퇴").click().run()
+        self.assertEqual(len(app.exception), 0)
+        self.repository_mocks["deactivate_user_account"].assert_called_once_with(12345)
+        self.assertIsNone(app.session_state["user_info"])
 
     def test_admin_preview_and_return(self):
         app = self.login(5070327065)

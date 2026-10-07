@@ -57,8 +57,10 @@ from user_settings_repository import (
     DuplicateFavoriteError,
     UserSettingsError,
     create_favorite,
+    deactivate_user_account,
     delete_favorite,
     get_global_notification_policy,
+    sync_existing_login_user,
     update_favorite_notification,
     update_global_notification_policy,
     update_notification_settings,
@@ -565,15 +567,24 @@ if ("code" in query_params or "error" in query_params) and st.session_state["use
                     headers={"Authorization": f"Bearer {access_token}"})
                 if user_status == 200 and user_data.get("id") is not None:
                     kakao_id = user_data["id"]
+                    nickname = user_data.get("properties", {}).get("nickname", "사용자")
                     refresh_token = token_data.get("refresh_token") or get_user_data(kakao_id).get("refresh_token", "")
                     try:
                         save_user_data(kakao_id, access_token=access_token, refresh_token=refresh_token)
+                        sync_existing_login_user(
+                            kakao_id,
+                            nickname=nickname,
+                            access_token=access_token,
+                            refresh_token=refresh_token,
+                        )
                     except OSError:
                         logger.exception("Could not save login data")
                         st.session_state["login_error"] = "로그인 정보를 저장하지 못했습니다. 파일 접근 상태를 확인한 뒤 다시 시도해 주세요."
+                    except UserSettingsError as exc:
+                        st.session_state["login_error"] = str(exc)
                     else:
                         st.session_state["user_info"] = {
-                            "id": kakao_id, "nickname": user_data.get("properties", {}).get("nickname", "사용자"),
+                            "id": kakao_id, "nickname": nickname,
                             "access_token": access_token, "refresh_token": refresh_token}
                         st.session_state["is_admin"] = kakao_id in [5070327065]
                         st.session_state["preview_user"] = False
@@ -1248,6 +1259,27 @@ with main_tab_target:
                     if notification_settings is not None else None
                 ),
             )
+            with st.expander("회원 탈퇴"):
+                st.warning(
+                    "회원 탈퇴 시 즐겨찾기와 즐겨찾기 알림이 비활성화되고, "
+                    "등록된 기기 알림이 해제되며, 현재 로그인이 종료됩니다."
+                )
+                confirm_withdrawal = st.checkbox(
+                    "위 내용을 확인했으며 회원 탈퇴를 진행합니다.",
+                    key="confirm_account_withdrawal",
+                )
+                if st.button(
+                    "회원 탈퇴",
+                    type="secondary",
+                    disabled=not confirm_withdrawal,
+                    key="deactivate_account_button",
+                ):
+                    try:
+                        deactivate_user_account(st.session_state["user_info"]["id"])
+                    except UserSettingsError as exc:
+                        st.error(str(exc))
+                    else:
+                        logout_user_session()
         elif st.session_state["preview_user"]:
             st.info("일반 사용자 미리보기에서는 기기 알림을 등록할 수 없습니다.")
         else:

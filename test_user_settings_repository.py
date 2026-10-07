@@ -3,23 +3,28 @@ from datetime import time
 from decimal import Decimal
 
 import pytest
+from cryptography.fernet import Fernet
 
 from user_settings_repository import (
     DuplicateFavoriteError,
     FavoriteMappingError,
     InvalidSettingsError,
     PermissionDeniedError,
+    UserSettingsError,
     UserNotFoundError,
     create_favorite,
+    deactivate_user_account,
     delete_favorite,
     get_global_notification_policy,
     get_notification_settings,
     get_user_dashboard_data,
     list_favorites,
+    sync_existing_login_user,
     update_favorite_notification,
     update_global_notification_policy,
     update_notification_settings,
 )
+from token_crypto import TOKEN_KEY_ENV
 
 
 class ScriptedCursor:
@@ -133,6 +138,110 @@ def test_unknown_user_is_not_created():
     with pytest.raises(UserNotFoundError):
         get_notification_settings(999, connection_factory=context)
     assert all("INSERT INTO users" not in call[1] for call in connection.cursor_value.calls)
+
+
+def test_login_sync_updates_existing_user_nickname_and_credentials(monkeypatch):
+    monkeypatch.setenv(TOKEN_KEY_ENV, Fernet.generate_key().decode("ascii"))
+    context, connection = factory([
+        ("SELECT id, enabled FROM users", (11, True)),
+        ("UPDATE users SET enabled=TRUE", None),
+        ("INSERT INTO notification_settings", None),
+        ("SELECT 1 FROM notification_active_days", (1,)),
+        ("INSERT INTO kakao_credentials", None),
+    ])
+    result = sync_existing_login_user(
+        123, nickname="새 닉네임", access_token="access", refresh_token="refresh",
+        transaction_factory=context,
+    )
+    assert result == {"user_id": 11, "reactivated": False}
+    calls = connection.cursor_value.calls
+    assert calls[1][2] == ("새 닉네임", 11)
+    assert "ON CONFLICT (user_id) DO UPDATE" in calls[-1][1]
+    assert all("INSERT INTO users" not in call[1] for call in calls)
+
+
+def test_login_sync_reactivates_soft_deleted_user_without_restoring_favorites_or_push(monkeypatch):
+    monkeypatch.setenv(TOKEN_KEY_ENV, Fernet.generate_key().decode("ascii"))
+    context, connection = factory([
+        ("SELECT id, enabled FROM users", (11, False)),
+        ("UPDATE users SET enabled=TRUE", None),
+        ("INSERT INTO notification_settings", None),
+        ("SELECT 1 FROM notification_active_days", []),
+        ("INSERT INTO notification_active_days", None),
+        ("INSERT INTO kakao_credentials", None),
+    ])
+    result = sync_existing_login_user(
+        123, nickname=None, access_token="access", refresh_token=None,
+        transaction_factory=context,
+    )
+    assert result == {"user_id": 11, "reactivated": True}
+    sql = " ".join(call[1] for call in connection.cursor_value.calls)
+    assert "UPDATE favorites" not in sql
+    assert "UPDATE push_subscriptions" not in sql
+    assert connection.cursor_value.calls[1][2] == (None, 11)
+    assert connection.cursor_value.calls[4][0] == "executemany"
+    assert connection.cursor_value.calls[4][2] == [(11, 0), (11, 1), (11, 2), (11, 3), (11, 4)]
+
+
+def test_login_sync_keeps_new_user_provisioning_out_of_scope():
+    context, connection = factory([("SELECT id, enabled FROM users", None)])
+    assert sync_existing_login_user(
+        999, nickname="신규", access_token="access", refresh_token="refresh",
+        transaction_factory=context,
+    ) is None
+    assert all("INSERT INTO users" not in call[1] for call in connection.cursor_value.calls)
+
+
+def test_account_deactivation_soft_deletes_notification_surfaces_and_credentials():
+    context, connection = factory([
+        user_step(),
+        ("UPDATE users SET enabled=FALSE", None),
+        ("UPDATE favorite_notifications", None),
+        ("UPDATE favorites SET active=FALSE", None),
+        ("UPDATE push_subscriptions SET enabled=FALSE", None),
+        ("UPDATE kakao_credentials SET access_token_ciphertext=NULL", None),
+    ])
+    deactivate_user_account(123, transaction_factory=context)
+    sql = " ".join(call[1] for call in connection.cursor_value.calls)
+    assert "DELETE FROM users" not in sql
+    assert "DELETE FROM favorites" not in sql
+    assert "UPDATE users SET enabled=FALSE" in sql
+    assert "UPDATE favorites SET active=FALSE" in sql
+    assert "revoked_at=now()" in sql
+    assert "access_token_ciphertext=NULL" in sql
+
+
+def test_account_deactivation_failure_uses_transaction_context():
+    class RollbackCursor(ScriptedCursor):
+        def execute(self, sql, params=None):
+            super().execute(sql, params)
+            if "UPDATE users SET enabled=FALSE" in sql:
+                raise RuntimeError("boom")
+
+    class RollbackConnection:
+        def __init__(self):
+            self.cursor_value = RollbackCursor([
+                user_step(),
+                ("UPDATE users SET enabled=FALSE", None),
+            ])
+
+        def cursor(self):
+            return self.cursor_value
+
+    seen = {}
+    connection = RollbackConnection()
+
+    @contextmanager
+    def context():
+        try:
+            yield connection
+        except Exception as exc:
+            seen["rolled_back_type"] = type(exc).__name__
+            raise
+
+    with pytest.raises(UserSettingsError, match="잠시 후"):
+        deactivate_user_account(123, transaction_factory=context)
+    assert seen["rolled_back_type"] == "RuntimeError"
 
 
 def test_database_failure_returns_safe_error_without_secret(caplog):
