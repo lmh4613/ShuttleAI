@@ -366,19 +366,52 @@ class AppFlowTests(unittest.TestCase):
         self.repository_mocks["sync_existing_login_user"].assert_called_once_with(
             12345, nickname="테스트", access_token="test", refresh_token="test-refresh"
         )
+        self.assertFalse(any("탈퇴한 계정" in item.value for item in app.info))
         data = json.loads(Path(self.data_file).read_text(encoding="utf-8"))["12345"]
         self.assertEqual(data["access_token"], "test")
         self.assertEqual(data["refresh_token"], "test-refresh")
+
+    def test_reactivated_user_gets_one_time_account_restart_notice(self):
+        self.repository_mocks["sync_existing_login_user"].side_effect.return_value = {
+            "user_id": 11, "reactivated": True,
+        }
+        app = self.login(12345)
+        self.assertEqual(len(app.exception), 0)
+        notice = [item.value for item in app.info if "탈퇴한 계정" in item.value]
+        self.assertEqual(len(notice), 1)
+        self.assertIn("다시 시작", notice[0])
+        self.assertIn("즐겨찾기", notice[0])
+        self.assertIn("기기 알림", notice[0])
+        self.assertNotIn("account_reactivated_flash", app.session_state.filtered_state)
+
+        app.run()
+        self.assertFalse(any("탈퇴한 계정" in item.value for item in app.info))
+        self.assertEqual(self.favorite_records, [])
 
     def test_account_withdrawal_requires_confirmation_and_ends_session(self):
         app = self.login(12345)
         withdrawal = next(b for b in app.button if b.label == "회원 탈퇴")
         self.assertTrue(withdrawal.disabled)
+        source = Path("app.py").read_text(encoding="utf-8")
+        sidebar_start = source.index("with st.sidebar:")
+        self.assertLess(
+            source.index("render_account_deactivation_controls()", sidebar_start),
+            source.index("st.title("),
+        )
+        main_block = source[source.index("with main_tab_target:"):]
+        self.assertNotIn('with st.expander("회원 탈퇴")', main_block)
         app.checkbox(key="confirm_account_withdrawal").check().run()
         next(b for b in app.button if b.label == "회원 탈퇴").click().run()
         self.assertEqual(len(app.exception), 0)
         self.repository_mocks["deactivate_user_account"].assert_called_once_with(12345)
         self.assertIsNone(app.session_state["user_info"])
+
+    def test_account_withdrawal_hidden_in_admin_preview_mode(self):
+        app = self.login(5070327065)
+        next(b for b in app.button if b.label == "일반 사용자 모드로 보기").click().run()
+        self.assertTrue(app.session_state["preview_user"])
+        self.assertFalse(any(b.label == "회원 탈퇴" for b in app.button))
+        self.repository_mocks["deactivate_user_account"].assert_not_called()
 
     def test_admin_preview_and_return(self):
         app = self.login(5070327065)

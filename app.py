@@ -571,7 +571,7 @@ if ("code" in query_params or "error" in query_params) and st.session_state["use
                     refresh_token = token_data.get("refresh_token") or get_user_data(kakao_id).get("refresh_token", "")
                     try:
                         save_user_data(kakao_id, access_token=access_token, refresh_token=refresh_token)
-                        sync_existing_login_user(
+                        login_sync = sync_existing_login_user(
                             kakao_id,
                             nickname=nickname,
                             access_token=access_token,
@@ -588,6 +588,8 @@ if ("code" in query_params or "error" in query_params) and st.session_state["use
                             "access_token": access_token, "refresh_token": refresh_token}
                         st.session_state["is_admin"] = kakao_id in [5070327065]
                         st.session_state["preview_user"] = False
+                        if login_sync and login_sync.get("reactivated"):
+                            st.session_state["account_reactivated_flash"] = True
                         invalidate_user_screen_data(st.session_state)
                         st.session_state.pop("login_error", None)
                 else:
@@ -628,6 +630,30 @@ def logout_user_session():
     st.session_state["preview_user"] = False
     st.query_params.clear()
     st.rerun()
+
+
+def render_account_deactivation_controls():
+    with st.expander("회원 탈퇴"):
+        st.warning(
+            "회원 탈퇴 시 즐겨찾기와 즐겨찾기 알림이 비활성화되고, "
+            "등록된 기기 알림이 해제되며, 현재 로그인이 종료됩니다."
+        )
+        confirm_withdrawal = st.checkbox(
+            "위 내용을 확인했으며 회원 탈퇴를 진행합니다.",
+            key="confirm_account_withdrawal",
+        )
+        if st.button(
+            "회원 탈퇴",
+            type="secondary",
+            disabled=not confirm_withdrawal,
+            key="deactivate_account_button",
+        ):
+            try:
+                deactivate_user_account(st.session_state["user_info"]["id"])
+            except UserSettingsError as exc:
+                st.error(str(exc))
+            else:
+                logout_user_session()
 
 
 login_links = []
@@ -672,8 +698,18 @@ with st.sidebar:
                 login_links.append(st.empty())
         if st.button("로그아웃", key="sidebar_logout", width='stretch'):
             logout_user_session()
+        if st.session_state["user_info"] and not st.session_state["preview_user"]:
+            st.divider()
+            render_account_deactivation_controls()
 
 st.title("🚌 AI 셔틀버스 날씨 알림 (탑승·하차 통합 안내)")
+
+if st.session_state.pop("account_reactivated_flash", False):
+    st.info(
+        "탈퇴한 계정으로 다시 로그인하여 ShuttleAI 이용이 다시 시작되었습니다. "
+        "이전 즐겨찾기와 기기 알림은 자동으로 복원되지 않습니다. "
+        "필요한 항목을 다시 설정해 주세요."
+    )
 
 with st.container(key="mobile_auth"):
     if st.session_state["user_info"] is None:
@@ -1259,27 +1295,6 @@ with main_tab_target:
                     if notification_settings is not None else None
                 ),
             )
-            with st.expander("회원 탈퇴"):
-                st.warning(
-                    "회원 탈퇴 시 즐겨찾기와 즐겨찾기 알림이 비활성화되고, "
-                    "등록된 기기 알림이 해제되며, 현재 로그인이 종료됩니다."
-                )
-                confirm_withdrawal = st.checkbox(
-                    "위 내용을 확인했으며 회원 탈퇴를 진행합니다.",
-                    key="confirm_account_withdrawal",
-                )
-                if st.button(
-                    "회원 탈퇴",
-                    type="secondary",
-                    disabled=not confirm_withdrawal,
-                    key="deactivate_account_button",
-                ):
-                    try:
-                        deactivate_user_account(st.session_state["user_info"]["id"])
-                    except UserSettingsError as exc:
-                        st.error(str(exc))
-                    else:
-                        logout_user_session()
         elif st.session_state["preview_user"]:
             st.info("일반 사용자 미리보기에서는 기기 알림을 등록할 수 없습니다.")
         else:
