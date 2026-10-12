@@ -23,7 +23,8 @@ class ForecastTests(unittest.TestCase):
         self.addCleanup(self.ai.stop)
 
     def fetch(self, now, target, data):
-        with patch.object(w, '_request_forecast', side_effect=data) as request:
+        with patch.object(w, '_request_forecast', side_effect=data) as request, \
+             patch.object(w, '_request_nowcast', return_value={}):
             result = w.get_weather_forecast_by_coords(37.4, 127.1, target_datetime=target, now=now)
         return result, request.call_args_list
 
@@ -116,6 +117,8 @@ class ForecastTests(unittest.TestCase):
                 (dt(14, 9), 'VilageFcst', dt(11)), (dt(14, 10), 'VilageFcst', dt(14)),
                 (dt(0, 20, 17), 'UltraSrtFcst', dt(23, 30))]:
             self.assertEqual(w.forecast_base(now, source), expected)
+        self.assertEqual(w.nowcast_base(dt(17, 55)), dt(17))
+        self.assertEqual(w.nowcast_base(dt(18, 5)), dt(17))
 
     def test_J_logs_only_source_and_no_secret(self):
         output = io.StringIO()
@@ -220,6 +223,64 @@ class ForecastTests(unittest.TestCase):
             result, _ = self.fetch(dt(16), dt(17, 45), [rows(18)])
         self.assertNotIn('26', result['message'])
         self.assertNotIn('흐', result['message'])
+
+    def test_near_departure_nowcast_current_precipitation_wins(self):
+        forecast = rows(18, T1H='26', SKY='4', PTY='4', RN1='1.0mm', POP='60')
+        with patch.object(w, '_request_forecast', return_value=forecast), \
+             patch.object(w, '_request_nowcast', return_value={'PTY': '1', 'RN1': '0.5'}):
+            result = w.get_weather_forecast_by_coords(
+                37.412915, 127.101235, target_datetime=dt(18, 5), now=dt(17, 55))
+        self.assertEqual(result['temperature'], '26°C')
+        self.assertEqual(result['sky_status'], '소나기')
+        self.assertEqual(result['precipitation_status'], 'current')
+        self.assertEqual(result['precipitation_certainty'], 'observed')
+        self.assertIn('현재 출발지', result['precipitation_note'])
+
+    def test_near_departure_dry_nowcast_softens_direct_forecast_rain(self):
+        forecast = rows(18, T1H='26', SKY='4', PTY='4', RN1='1.0mm', POP='60')
+        with patch.object(w, '_request_forecast', return_value=forecast), \
+             patch.object(w, '_request_nowcast', return_value={'PTY': '0', 'RN1': '0'}):
+            result = w.get_weather_forecast_by_coords(
+                37.412915, 127.101235, target_datetime=dt(18, 5), now=dt(17, 55))
+        self.assertEqual(result['temperature'], '26°C')
+        self.assertEqual(result['sky_status'], '소나기')
+        self.assertEqual(result['precipitation_status'], 'forecast_only')
+        self.assertEqual(result['precipitation_certainty'], 'possible')
+        self.assertEqual(result['precipitation_note'], '출발 시간대 비가 내릴 가능성이 있습니다.')
+
+    def test_near_departure_dry_nowcast_and_dry_forecast_has_no_rain(self):
+        forecast = rows(18, T1H='26', SKY='1', PTY='0', RN1='강수없음', POP='0')
+        with patch.object(w, '_request_forecast', return_value=forecast), \
+             patch.object(w, '_request_nowcast', return_value={'PTY': '0', 'RN1': '0'}):
+            result = w.get_weather_forecast_by_coords(37.4, 127.1, target_datetime=dt(18, 5), now=dt(17, 55))
+        self.assertEqual(result['precipitation_status'], 'none')
+        self.assertEqual(result['precipitation_note'], '')
+
+    def test_near_departure_dry_nowcast_keeps_pop_only_possible(self):
+        forecast = rows(18, T1H='26', SKY='4', PTY='0', RN1='강수없음', POP='60')
+        with patch.object(w, '_request_forecast', return_value=forecast), \
+             patch.object(w, '_request_nowcast', return_value={'PTY': '0', 'RN1': '0'}):
+            result = w.get_weather_forecast_by_coords(37.4, 127.1, target_datetime=dt(18, 5), now=dt(17, 55))
+        self.assertEqual(result['precipitation_status'], 'possible')
+        self.assertEqual(result['precipitation_certainty'], 'possible')
+        self.assertEqual(result['precipitation_note'], '출발 시간대 비가 내릴 가능성이 있습니다.')
+
+    def test_near_departure_nowcast_failure_falls_back_to_existing_forecast(self):
+        forecast = rows(18, T1H='26', SKY='4', PTY='4', RN1='1.0mm', POP='60')
+        with patch.object(w, '_request_forecast', return_value=forecast), \
+             patch.object(w, '_request_nowcast', return_value={}) as nowcast:
+            result = w.get_weather_forecast_by_coords(37.4, 127.1, target_datetime=dt(18, 5), now=dt(17, 55))
+        self.assertGreaterEqual(nowcast.call_count, 1)
+        self.assertEqual(result['precipitation_status'], 'boarding')
+        self.assertEqual(result['precipitation_certainty'], 'forecast')
+
+    def test_more_than_one_hour_does_not_call_nowcast_and_keeps_existing_logic(self):
+        forecast = rows(19, T1H='26', SKY='4', PTY='4', RN1='1.0mm', POP='60')
+        with patch.object(w, '_request_forecast', return_value=forecast), \
+             patch.object(w, '_request_nowcast', side_effect=AssertionError('nowcast forbidden')):
+            result = w.get_weather_forecast_by_coords(37.4, 127.1, target_datetime=dt(19), now=dt(17, 30))
+        self.assertEqual(result['precipitation_status'], 'boarding')
+        self.assertEqual(result['precipitation_certainty'], 'forecast')
 
 
 if __name__ == '__main__':
