@@ -60,7 +60,7 @@ from user_settings_repository import (
     deactivate_user_account,
     delete_favorite,
     get_global_notification_policy,
-    sync_existing_login_user,
+    provision_or_sync_login_user,
     update_favorite_notification,
     update_global_notification_policy,
     update_notification_settings,
@@ -570,19 +570,19 @@ if ("code" in query_params or "error" in query_params) and st.session_state["use
                     nickname = user_data.get("properties", {}).get("nickname", "사용자")
                     refresh_token = token_data.get("refresh_token") or get_user_data(kakao_id).get("refresh_token", "")
                     try:
-                        save_user_data(kakao_id, access_token=access_token, refresh_token=refresh_token)
-                        login_sync = sync_existing_login_user(
+                        login_sync = provision_or_sync_login_user(
                             kakao_id,
                             nickname=nickname,
                             access_token=access_token,
                             refresh_token=refresh_token,
                         )
-                    except OSError:
-                        logger.exception("Could not save login data")
-                        st.session_state["login_error"] = "로그인 정보를 저장하지 못했습니다. 파일 접근 상태를 확인한 뒤 다시 시도해 주세요."
                     except UserSettingsError as exc:
                         st.session_state["login_error"] = str(exc)
                     else:
+                        try:
+                            save_user_data(kakao_id, access_token=access_token, refresh_token=refresh_token)
+                        except OSError:
+                            logger.exception("Could not persist legacy Kakao login data")
                         st.session_state["user_info"] = {
                             "id": kakao_id, "nickname": nickname,
                             "access_token": access_token, "refresh_token": refresh_token}

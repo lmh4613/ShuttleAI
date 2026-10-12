@@ -19,6 +19,7 @@ from user_settings_repository import (
     get_notification_settings,
     get_user_dashboard_data,
     list_favorites,
+    provision_or_sync_login_user,
     sync_existing_login_user,
     update_favorite_notification,
     update_global_notification_policy,
@@ -153,7 +154,7 @@ def test_login_sync_updates_existing_user_nickname_and_credentials(monkeypatch):
         123, nickname="새 닉네임", access_token="access", refresh_token="refresh",
         transaction_factory=context,
     )
-    assert result == {"user_id": 11, "reactivated": False}
+    assert result == {"user_id": 11, "created": False, "reactivated": False}
     calls = connection.cursor_value.calls
     assert calls[1][2] == ("새 닉네임", 11)
     assert "ON CONFLICT (user_id) DO UPDATE" in calls[-1][1]
@@ -174,7 +175,7 @@ def test_login_sync_reactivates_soft_deleted_user_without_restoring_favorites_or
         123, nickname=None, access_token="access", refresh_token=None,
         transaction_factory=context,
     )
-    assert result == {"user_id": 11, "reactivated": True}
+    assert result == {"user_id": 11, "created": False, "reactivated": True}
     sql = " ".join(call[1] for call in connection.cursor_value.calls)
     assert "UPDATE favorites" not in sql
     assert "UPDATE push_subscriptions" not in sql
@@ -183,13 +184,83 @@ def test_login_sync_reactivates_soft_deleted_user_without_restoring_favorites_or
     assert connection.cursor_value.calls[4][2] == [(11, 0), (11, 1), (11, 2), (11, 3), (11, 4)]
 
 
-def test_login_sync_keeps_new_user_provisioning_out_of_scope():
-    context, connection = factory([("SELECT id, enabled FROM users", None)])
-    assert sync_existing_login_user(
+def test_login_provisions_new_user_with_default_settings_and_credentials(monkeypatch):
+    monkeypatch.setenv(TOKEN_KEY_ENV, Fernet.generate_key().decode("ascii"))
+    context, connection = factory([
+        ("SELECT id, enabled FROM users", None),
+        ("INSERT INTO users", (12, True)),
+        ("INSERT INTO notification_settings", None),
+        ("SELECT 1 FROM notification_active_days", None),
+        ("INSERT INTO notification_active_days", None),
+        ("INSERT INTO kakao_credentials", None),
+    ])
+    result = provision_or_sync_login_user(
         999, nickname="신규", access_token="access", refresh_token="refresh",
         transaction_factory=context,
-    ) is None
-    assert all("INSERT INTO users" not in call[1] for call in connection.cursor_value.calls)
+    )
+    assert result == {"user_id": 12, "created": True, "reactivated": False}
+    calls = connection.cursor_value.calls
+    assert calls[1][2] == (999, "신규")
+    assert calls[4][0] == "executemany"
+    assert calls[4][2] == [(12, 0), (12, 1), (12, 2), (12, 3), (12, 4)]
+
+
+def test_login_provisioning_recovers_from_concurrent_insert_without_duplicate_user(monkeypatch):
+    monkeypatch.setenv(TOKEN_KEY_ENV, Fernet.generate_key().decode("ascii"))
+    context, connection = factory([
+        ("SELECT id, enabled FROM users", None),
+        ("INSERT INTO users", None),
+        ("SELECT id, enabled FROM users", (13, True)),
+        ("UPDATE users SET enabled=TRUE", None),
+        ("INSERT INTO notification_settings", None),
+        ("SELECT 1 FROM notification_active_days", (1,)),
+        ("INSERT INTO kakao_credentials", None),
+    ])
+    result = provision_or_sync_login_user(
+        999, nickname="동시", access_token="access", refresh_token="refresh",
+        transaction_factory=context,
+    )
+    assert result == {"user_id": 13, "created": False, "reactivated": False}
+    assert sum("INSERT INTO users" in call[1] for call in connection.cursor_value.calls) == 1
+
+
+def test_new_user_provisioning_failure_uses_transaction_rollback(monkeypatch):
+    monkeypatch.setenv(TOKEN_KEY_ENV, Fernet.generate_key().decode("ascii"))
+
+    class RollbackCursor(ScriptedCursor):
+        def execute(self, sql, params=None):
+            super().execute(sql, params)
+            if "INSERT INTO notification_settings" in sql:
+                raise RuntimeError("settings failed")
+
+    class RollbackConnection:
+        def __init__(self):
+            self.cursor_value = RollbackCursor([
+                ("SELECT id, enabled FROM users", None),
+                ("INSERT INTO users", (12, True)),
+                ("INSERT INTO notification_settings", None),
+            ])
+
+        def cursor(self):
+            return self.cursor_value
+
+    seen = {}
+    connection = RollbackConnection()
+
+    @contextmanager
+    def context():
+        try:
+            yield connection
+        except Exception as exc:
+            seen["rolled_back_type"] = type(exc).__name__
+            raise
+
+    with pytest.raises(UserSettingsError, match="잠시 후"):
+        provision_or_sync_login_user(
+            999, nickname="신규", access_token="access", refresh_token="refresh",
+            transaction_factory=context,
+        )
+    assert seen["rolled_back_type"] == "RuntimeError"
 
 
 def test_account_deactivation_soft_deletes_notification_surfaces_and_credentials():

@@ -241,7 +241,12 @@ class AppFlowTests(unittest.TestCase):
             "update_notification_settings": update_notification,
             "get_global_notification_policy": lambda: "AUTO",
             "update_global_notification_policy": Mock(),
-            "sync_existing_login_user": Mock(return_value={"user_id": 11, "reactivated": False}),
+            "provision_or_sync_login_user": Mock(return_value={
+                "user_id": 11, "created": False, "reactivated": False,
+            }),
+            "sync_existing_login_user": Mock(return_value={
+                "user_id": 11, "created": False, "reactivated": False,
+            }),
             "deactivate_user_account": Mock(),
         }
         self.repository_patchers = [
@@ -360,10 +365,10 @@ class AppFlowTests(unittest.TestCase):
             len([button for button in logged_in.button if button.label == "로그아웃"]), 2
         )
 
-    def test_login_syncs_existing_user_nickname_without_provisioning_new_user(self):
+    def test_login_provisions_or_syncs_user_before_session(self):
         app = self.login(12345)
         self.assertEqual(len(app.exception), 0)
-        self.repository_mocks["sync_existing_login_user"].assert_called_once_with(
+        self.repository_mocks["provision_or_sync_login_user"].assert_called_once_with(
             12345, nickname="테스트", access_token="test", refresh_token="test-refresh"
         )
         self.assertFalse(any("탈퇴한 계정" in item.value for item in app.info))
@@ -372,8 +377,8 @@ class AppFlowTests(unittest.TestCase):
         self.assertEqual(data["refresh_token"], "test-refresh")
 
     def test_reactivated_user_gets_one_time_account_restart_notice(self):
-        self.repository_mocks["sync_existing_login_user"].side_effect.return_value = {
-            "user_id": 11, "reactivated": True,
+        self.repository_mocks["provision_or_sync_login_user"].side_effect.return_value = {
+            "user_id": 11, "created": False, "reactivated": True,
         }
         app = self.login(12345)
         self.assertEqual(len(app.exception), 0)
@@ -387,6 +392,15 @@ class AppFlowTests(unittest.TestCase):
         app.run()
         self.assertFalse(any("탈퇴한 계정" in item.value for item in app.info))
         self.assertEqual(self.favorite_records, [])
+
+    def test_newly_created_user_gets_dashboard_without_reactivation_notice(self):
+        self.repository_mocks["provision_or_sync_login_user"].side_effect.return_value = {
+            "user_id": 11, "created": True, "reactivated": False,
+        }
+        app = self.login(12345)
+        self.assertEqual(len(app.exception), 0)
+        self.assertFalse(any("탈퇴한 계정" in item.value for item in app.info))
+        self.repository_mocks["get_user_dashboard_data"].assert_called_once_with(12345)
 
     def test_account_withdrawal_requires_confirmation_and_ends_session(self):
         app = self.login(12345)
