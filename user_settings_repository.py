@@ -57,6 +57,111 @@ def _user_row(cursor, kakao_user_id: int):
     return row
 
 
+def _ensure_default_login_dependencies(cursor, user_id: int) -> None:
+    cursor.execute(
+        "INSERT INTO notification_settings "
+        "(user_id, exclude_holidays, timezone, delivery_channel) "
+        "VALUES (%s, TRUE, %s, 'KAKAO') "
+        "ON CONFLICT (user_id) DO NOTHING",
+        (user_id, DEFAULT_TIMEZONE),
+    )
+    cursor.execute(
+        "SELECT 1 FROM notification_active_days WHERE user_id=%s LIMIT 1",
+        (user_id,),
+    )
+    if cursor.fetchone() is None:
+        cursor.executemany(
+            "INSERT INTO notification_active_days (user_id, weekday) "
+            "VALUES (%s, %s) ON CONFLICT DO NOTHING",
+            [(user_id, day) for day in DEFAULT_ACTIVE_DAYS],
+        )
+
+
+def _upsert_kakao_credentials(
+    cursor,
+    user_id: int,
+    *,
+    access_token: str,
+    refresh_token: str | None,
+) -> None:
+    cursor.execute(
+        "INSERT INTO kakao_credentials "
+        "(user_id, access_token_ciphertext, refresh_token_ciphertext, "
+        "token_updated_at) VALUES (%s, %s, %s, now()) "
+        "ON CONFLICT (user_id) DO UPDATE SET "
+        "access_token_ciphertext=EXCLUDED.access_token_ciphertext, "
+        "refresh_token_ciphertext=COALESCE("
+        "EXCLUDED.refresh_token_ciphertext, "
+        "kakao_credentials.refresh_token_ciphertext), "
+        "token_updated_at=now()",
+        (
+            user_id,
+            encrypt_token(access_token),
+            encrypt_token(refresh_token),
+        ),
+    )
+
+
+def provision_or_sync_login_user(
+    kakao_user_id: int,
+    *,
+    nickname: str | None,
+    access_token: str,
+    refresh_token: str | None,
+    transaction_factory: Callable = database_transaction,
+) -> dict | None:
+    """Create or refresh a Kakao login user and required dashboard defaults."""
+    normalized_nickname = nickname if isinstance(nickname, str) and nickname.strip() else None
+    try:
+        with transaction_factory() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT id, enabled FROM users WHERE kakao_user_id=%s FOR UPDATE",
+                    (kakao_user_id,),
+                )
+                row = cursor.fetchone()
+                created = False
+                if row is None:
+                    cursor.execute(
+                        "INSERT INTO users "
+                        "(kakao_user_id, nickname, role, enabled, last_login_at) "
+                        "VALUES (%s, %s, 'user', TRUE, now()) "
+                        "ON CONFLICT (kakao_user_id) DO NOTHING "
+                        "RETURNING id, enabled",
+                        (kakao_user_id, normalized_nickname),
+                    )
+                    row = cursor.fetchone()
+                    if row is None:
+                        cursor.execute(
+                            "SELECT id, enabled FROM users WHERE kakao_user_id=%s FOR UPDATE",
+                            (kakao_user_id,),
+                        )
+                        row = cursor.fetchone()
+                        if row is None:
+                            raise UserSettingsError(
+                                "사용자 정보를 생성하지 못했습니다. 잠시 후 다시 로그인해 주세요."
+                            )
+                    else:
+                        created = True
+                user_id, was_enabled = row
+                if not created:
+                    cursor.execute(
+                        "UPDATE users SET enabled=TRUE, nickname=%s, last_login_at=now() "
+                        "WHERE id=%s",
+                        (normalized_nickname, user_id),
+                    )
+                _ensure_default_login_dependencies(cursor, user_id)
+                _upsert_kakao_credentials(
+                    cursor,
+                    user_id,
+                    access_token=access_token,
+                    refresh_token=refresh_token,
+                )
+        return {"user_id": user_id, "created": created, "reactivated": not created and not was_enabled}
+    except Exception as exc:
+        raise _db_error("login sync", exc) from None
+
+
 def sync_existing_login_user(
     kakao_user_id: int,
     *,
@@ -65,60 +170,14 @@ def sync_existing_login_user(
     refresh_token: str | None,
     transaction_factory: Callable = database_transaction,
 ) -> dict | None:
-    """Refresh an existing user's login metadata; re-enable soft-deleted users."""
-    normalized_nickname = nickname if isinstance(nickname, str) and nickname.strip() else None
-    try:
-        with transaction_factory() as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "SELECT id, enabled FROM users WHERE kakao_user_id=%s",
-                    (kakao_user_id,),
-                )
-                row = cursor.fetchone()
-                if row is None:
-                    return None
-                user_id, was_enabled = row
-                cursor.execute(
-                    "UPDATE users SET enabled=TRUE, nickname=%s, last_login_at=now() "
-                    "WHERE id=%s",
-                    (normalized_nickname, user_id),
-                )
-                cursor.execute(
-                    "INSERT INTO notification_settings "
-                    "(user_id, exclude_holidays, timezone, delivery_channel) "
-                    "VALUES (%s, TRUE, %s, 'KAKAO') "
-                    "ON CONFLICT (user_id) DO NOTHING",
-                    (user_id, DEFAULT_TIMEZONE),
-                )
-                cursor.execute(
-                    "SELECT 1 FROM notification_active_days WHERE user_id=%s LIMIT 1",
-                    (user_id,),
-                )
-                if cursor.fetchone() is None:
-                    cursor.executemany(
-                        "INSERT INTO notification_active_days (user_id, weekday) "
-                        "VALUES (%s, %s) ON CONFLICT DO NOTHING",
-                        [(user_id, day) for day in DEFAULT_ACTIVE_DAYS],
-                    )
-                cursor.execute(
-                    "INSERT INTO kakao_credentials "
-                    "(user_id, access_token_ciphertext, refresh_token_ciphertext, "
-                    "token_updated_at) VALUES (%s, %s, %s, now()) "
-                    "ON CONFLICT (user_id) DO UPDATE SET "
-                    "access_token_ciphertext=EXCLUDED.access_token_ciphertext, "
-                    "refresh_token_ciphertext=COALESCE("
-                    "EXCLUDED.refresh_token_ciphertext, "
-                    "kakao_credentials.refresh_token_ciphertext), "
-                    "token_updated_at=now()",
-                    (
-                        user_id,
-                        encrypt_token(access_token),
-                        encrypt_token(refresh_token),
-                    ),
-                )
-        return {"user_id": user_id, "reactivated": not was_enabled}
-    except Exception as exc:
-        raise _db_error("login sync", exc) from None
+    """Backward-compatible wrapper for login provisioning."""
+    return provision_or_sync_login_user(
+        kakao_user_id,
+        nickname=nickname,
+        access_token=access_token,
+        refresh_token=refresh_token,
+        transaction_factory=transaction_factory,
+    )
 
 
 def deactivate_user_account(
