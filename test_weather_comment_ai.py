@@ -244,6 +244,16 @@ def test_natural_destination_possibility_is_accepted(client, text):
     assert result['text'] == text
 
 
+def test_current_nowcast_precipitation_allows_observed_wording(client):
+    text = '퇴근길 현재 출발지에 비가 내리고 있습니다. 우산을 챙겨 귀가하세요.'
+    situation = guard_situation(status='current', certainty='observed')
+    assert ai.comment_validation_error(text, situation) is None
+    client.models.generate_content.return_value = Mock(text=json.dumps({'comment': text}))
+    result = ai.generate_once(situation, '퇴근길')
+    assert result['source'] == 'gemini'
+    assert result['text'] == text
+
+
 @pytest.mark.parametrize('situation,text,rule', [
     (guard_situation(), '출근길에는 출발할 때 비가 예상됩니다.', 'during_trip_context'),
     (guard_situation(), '퇴근길에는 탑승 전 비가 예상됩니다.', 'during_trip_context'),

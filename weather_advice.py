@@ -39,11 +39,13 @@ def assess_weather(boarding, destination):
             events.append((location, status, weather))
     if events:
         # Keep boarding/later/destination priority, without inventing arrival time.
-        selected = next((event for event in events if event[:2] == ('boarding', 'boarding')), None)
+        selected = next((event for event in events if event[:2] == ('boarding', 'current')), None)
+        selected = selected or next((event for event in events if event[:2] == ('boarding', 'boarding')), None)
+        selected = selected or next((event for event in events if event[:2] == ('boarding', 'forecast_only')), None)
         selected = selected or next((event for event in events if event[1] == 'during_trip'), None)
         selected = selected or next((event for event in events if event[2].get('precipitation_certainty') == 'forecast'), events[0])
         location, status, data = selected
-        result.update(precipitation_status=status if status == 'during_trip' or location == 'boarding' else 'possible',
+        result.update(precipitation_status=status if status in ('current', 'during_trip', 'forecast_only') or location == 'boarding' else 'possible',
                       destination_precipitation=all(event[0] == 'destination' for event in events),
                       precipitation_type=data.get('precipitation_type', 'unknown'),
                       precipitation_certainty=data.get('precipitation_certainty', 'possible'))
@@ -132,11 +134,15 @@ def render_advice(situation, trip_type='출근길', date_key=None):
         return summary + (' ' + choose(ACTION['snow' if snow else 'rain'], 'action').format(**values) if rain else '')
     if rain:
         kind = {'rain': '비가', 'snow': '눈이', 'mixed': '비와 눈이 섞여', 'unknown': '강수가'}[situation['precipitation_type']]
-        if situation['precipitation_type'] == 'mixed':
+        if situation['precipitation_status'] == 'current':
+            precipitation = kind + ' 내리고 있습니다'
+        elif situation['precipitation_type'] == 'mixed':
             precipitation = kind + (' 내릴 것으로 예상됩니다' if situation['precipitation_certainty'] == 'forecast' else ' 내릴 가능성이 있습니다')
         else:
             precipitation = kind + (' 예상됩니다' if situation['precipitation_certainty'] == 'forecast' else ' 내릴 가능성이 있습니다')
-        when = '출발할 때 ' if situation['precipitation_status'] == 'boarding' else ''
+        when = ('현재 출발지에 ' if situation['precipitation_status'] == 'current' else
+                '출발 시간대 ' if situation['precipitation_status'] in ('forecast_only', 'possible') and not situation['destination_precipitation'] else
+                '출발할 때 ' if situation['precipitation_status'] == 'boarding' else '')
         if situation['destination_precipitation']:
             when += '하차 지역에 '
         if situation['precipitation_status'] == 'during_trip':

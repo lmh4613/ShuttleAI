@@ -356,6 +356,14 @@ def forecast_base(now, source):
     return base
 
 
+def nowcast_base(now):
+    # Ultra-short nowcast observations are hourly. Keep a small publication delay
+    # buffer and let callers fall back to the previous hour if the latest slot is
+    # not available yet.
+    available = as_kst(now) - timedelta(minutes=10)
+    return available.replace(minute=0, second=0, microsecond=0)
+
+
 def _request_forecast(source, base, nx, ny):
     params = {
         "serviceKey": urllib.parse.unquote(KMA_API_KEY or ""),
@@ -390,6 +398,37 @@ def _request_forecast(source, base, nx, ny):
         return {}
 
 
+def _request_nowcast(base, nx, ny):
+    params = {
+        "serviceKey": urllib.parse.unquote(KMA_API_KEY or ""),
+        "pageNo": "1", "numOfRows": "1000", "dataType": "JSON",
+        "base_date": base.strftime("%Y%m%d"), "base_time": base.strftime("%H%M"),
+        "nx": nx, "ny": ny,
+    }
+    try:
+        res = requests.get(
+            "https://apis.data.go.kr/1360000/VilageFcstInfoService_2.0/getUltraSrtNcst",
+            params=params, timeout=8)
+        if res.status_code != 200:
+            print(f"[WEATHER] source=UltraSrtNcst HTTP={res.status_code}")
+            return {}
+        response = res.json().get("response", {})
+        code = response.get("header", {}).get("resultCode")
+        if code != "00":
+            print("[WEATHER] source=UltraSrtNcst invalid_or_error_response")
+            return {}
+        items = response.get("body", {}).get("items", {}).get("item", [])
+        values = {}
+        for item in items:
+            category = item.get("category")
+            if category:
+                values[category] = item.get("obsrValue")
+        return values
+    except Exception as exc:
+        print(f"[WEATHER] source=UltraSrtNcst request_failed={type(exc).__name__}")
+        return {}
+
+
 def _number(value):
     try:
         number = float(value)
@@ -398,7 +437,7 @@ def _number(value):
         return None
 
 
-def _has_precipitation(values):
+def _has_direct_precipitation(values):
     pty = _number(values.get("PTY"))
     if pty in (1, 2, 3, 4, 5, 6, 7):
         return True
@@ -409,9 +448,25 @@ def _has_precipitation(values):
         match = re.search(r"[-+]?\d+(?:\.\d+)?", amount)
         if match and float(match.group()) > 0:
             return True
+    return False
+
+
+def _has_precipitation(values):
+    if _has_direct_precipitation(values):
+        return True
     pop = _number(values.get("POP"))
     # Probability alone is a possibility, never a claim that precipitation occurs.
     return pop is not None and 60 <= pop <= 100
+
+
+def get_ultra_short_nowcast_precipitation(nx, ny, now=None):
+    base = nowcast_base(now or korea_now())
+    for candidate in (base, base - timedelta(hours=1)):
+        values = _request_nowcast(candidate, nx, ny)
+        if values:
+            return {"available": True, "base": candidate, "values": values,
+                    "current_precipitation": _has_direct_precipitation(values)}
+    return {"available": False, "base": base, "values": {}, "current_precipitation": False}
 
 
 def precipitation_note(forecast, target_hour, source, boarding_target=None):
@@ -445,7 +500,8 @@ def get_weather_forecast_by_coords(lat, lon, stop_name="", trip_type="출근길"
         nx, ny = latlon_to_grid(float(lat), float(lon))
     except (TypeError, ValueError, OverflowError):
         return _unavailable("정류장 위치를 확인할 수 없어 날씨 정보를 불러오지 못했습니다.", target)
-    source = "UltraSrtFcst" if timedelta(minutes=-1) < target - now <= timedelta(hours=4) else "VilageFcst"
+    lead_time = target - now
+    source = "UltraSrtFcst" if timedelta(minutes=-1) < lead_time <= timedelta(hours=4) else "VilageFcst"
     base = forecast_base(now, source)
     forecast = _request_forecast(source, base, nx, ny)
 
@@ -480,17 +536,43 @@ def get_weather_forecast_by_coords(lat, lon, stop_name="", trip_type="출근길"
     # Preserve actual precipitation fields for deterministic preparation advice.
     wet_slots = [slot for slot in rain_window if _has_precipitation(slot)]
     selected_time = target_hour.strftime("%Y-%m-%d %H:%M")
-    direct = lambda slot: _has_precipitation({k: v for k, v in slot.items() if k != "POP"})
-    if any(slot['time'] == selected_time and direct(slot) for slot in wet_slots):
+    direct = lambda slot: _has_direct_precipitation(slot)
+    selected_direct = any(slot['time'] == selected_time and direct(slot) for slot in wet_slots)
+    later_direct = any(slot['time'] != selected_time and direct(slot) for slot in wet_slots)
+    pop_only = bool(wet_slots) and not selected_direct and not later_direct
+    ncst = {"available": False, "current_precipitation": False, "values": {}}
+    near_boarding = source == "UltraSrtFcst" and location == "boarding" and timedelta(0) <= lead_time <= timedelta(hours=1)
+    if near_boarding:
+        ncst = get_ultra_short_nowcast_precipitation(nx, ny, now)
+    if near_boarding and ncst["available"]:
+        if ncst["current_precipitation"]:
+            rain_status = "current"
+        elif selected_direct:
+            rain_status = "forecast_only"
+        elif later_direct:
+            rain_status = "during_trip"
+        elif pop_only:
+            rain_status = "possible"
+        else:
+            rain_status = "none"
+    elif selected_direct:
         rain_status = "boarding"
-    elif any(slot['time'] != selected_time and direct(slot) for slot in wet_slots):
+    elif later_direct:
         rain_status = "during_trip"
-    elif wet_slots:
+    elif pop_only:
         rain_status = "possible"
     else:
         rain_status = "none"
+    if rain_status == "current":
+        rain_note = "현재 출발지에 비가 내리고 있습니다."
+    elif rain_status == "forecast_only":
+        rain_note = "출발 시간대 비 가능성이 있습니다."
+    elif rain_status == "possible":
+        rain_note = "출발 시간대 비 가능성이 있습니다."
     relevant = [slot for slot in wet_slots if direct(slot) and
-                (slot['time'] == selected_time if rain_status == 'boarding' else slot['time'] != selected_time)]
+                (slot['time'] == selected_time if rain_status in ('boarding', 'forecast_only') else slot['time'] != selected_time)]
+    if rain_status == "current":
+        relevant = [ncst["values"]]
     kinds = set()
     for slot in relevant:
         pty_value = _number(slot.get('PTY'))
@@ -506,6 +588,23 @@ def get_weather_forecast_by_coords(lat, lon, stop_name="", trip_type="출근길"
                  next(iter(kinds)) if len(kinds) == 1 else 'unknown')
     if rain_status == 'possible':
         rain_type = 'rain'  # POP-only wording stays explicitly probabilistic.
+    if rain_status == 'forecast_only':
+        rain_type = rain_type if rain_type != 'unknown' else 'rain'
+    if rain_status == 'current' and rain_type == 'unknown':
+        rain_type = 'rain'
+    if rain_status == "current":
+        precipitation_certainty = "observed"
+    elif rain_status in ("forecast_only", "possible"):
+        precipitation_certainty = "possible"
+    elif near_boarding and ncst["available"] and rain_status == "during_trip":
+        precipitation_certainty = "possible"
+    else:
+        precipitation_certainty = "forecast" if relevant else "possible"
+    current_noun = {"rain": "비가", "snow": "눈이", "mixed": "비와 눈이 섞여", "unknown": "강수가"}[rain_type]
+    if rain_status == "current":
+        rain_note = f"현재 출발지에 {current_noun} 내리고 있습니다."
+    elif rain_status in ("forecast_only", "possible"):
+        rain_note = f"출발 시간대 {current_noun} 내릴 가능성이 있습니다."
     # Weather commentary no longer needs a model call; coordinate lookup still uses Gemini.
     ai_message = ""
     return {"available": True, "temperature": temp, "sky_status": sky, "rain_probability": pop,
@@ -513,4 +612,7 @@ def get_weather_forecast_by_coords(lat, lon, stop_name="", trip_type="출근길"
             "target_time": target.isoformat(), "precipitation_note": rain_note,
             "precipitation_status": rain_status, "precipitation_window": rain_window,
             "precipitation_type": rain_type,
-            "precipitation_certainty": "forecast" if relevant else "possible"}
+            "precipitation_source": ("ncst" if rain_status == "current" else
+                                     "ncst+forecast" if near_boarding and ncst["available"] else
+                                     "forecast_fallback" if near_boarding else "forecast"),
+            "precipitation_certainty": precipitation_certainty}

@@ -61,15 +61,16 @@ def build_prompt(situation, trip_type):
 우선순위는 강수 > 의미 있는 기온 변화 > 복장 > 하늘상태입니다.
 meaningful_temperature_change=false면 지역 간 기온차를 강조하지 마세요.
 precipitation_type: rain=비, snow=눈, mixed=비와 눈 혼합, unknown=종류 미상의 강수입니다.
-precipitation_certainty=forecast이면 '비/눈/강수가 예상됩니다'처럼 예보형으로 표현하세요.
+precipitation_certainty=observed이면 '현재 출발지에 비/눈/강수가 내리고 있습니다'처럼 실황형으로 표현하세요.
+forecast이면 '비/눈/강수가 예상됩니다'처럼 예보형으로 표현하세요.
 possible이면 '내릴 가능성이 있습니다'를 사용하세요. 가능성을 확정 예보로, 명확한 예보를 가능성으로 바꾸지 마세요.
 precipitation_status=none이면 강수나 우산 안내를 만들지 마세요.
-boarding은 출발 시점, during_trip은 탑승 후 최대 2시간 범위의 예보입니다.
+current는 출발지 현재 실황, boarding은 출발 시점 예보, forecast_only는 실황은 건조하지만 출발 시간대 예보상 가능성, during_trip은 탑승 후 최대 2시간 범위의 예보입니다.
 destination_precipitation=true이면 하차 지역 예보일 뿐 도착 시각 예보가 아닙니다.
 정확한 도착/하차 시각, 이동시간, 전달되지 않은 강수시간을 추정하지 마세요.
 두 지역은 같은 탑승시각 기준 예보이며 '이동하면서 기온이 오른다' 같은 시간 변화를 만들지 마세요.
 바람/풍속/습도/건조/체감온도/날씨 원인/미세먼지 등 전달되지 않은 사실을 추가하지 마세요.
-'현재 비가 오고 있습니다', '지금' 등 조회 시점의 실황 표현은 금지합니다.
+precipitation_status=current가 아니면 '현재 비가 오고 있습니다', '지금' 등 조회 시점의 실황 표현은 금지합니다.
 sky_summary가 비어 있으면 하늘상태를 추정하지 마세요. 비/눈 종류도 주어진 값만 사용하세요.
 출력은 마크다운 없이 {"comment": "최종 안내"} JSON 객체 하나만 반환하세요.
 판정 입력:
@@ -90,7 +91,8 @@ def comment_validation_error(text, situation):
         return 'response_length_or_type'
     if re.search(r'[\d{}\[\]`#\n]', text):
         return 'response_format'
-    if re.search(r'현재|지금|바람|풍속|습도|건조|체감온도|기압|미세먼지|자외선|태풍|폭우|한파|탑승 예정 시간대|기온 차이가 거의', text):
+    unsupported = r'바람|풍속|습도|건조|체감온도|기압|미세먼지|자외선|태풍|폭우|한파|탑승 예정 시간대|기온 차이가 거의'
+    if re.search(unsupported, text) or (situation['precipitation_status'] != 'current' and re.search(r'현재|지금', text)):
         return 'unsupported_fact'
     if re.search(r'(?:도착|하차)(?:할|하는|\s*예정)?\s*(?:때|무렵|시간|시각|시점|직전|직후|후)|내릴\s*때|이동하면서', text):
         return 'arrival_time'
@@ -131,7 +133,10 @@ def comment_validation_error(text, situation):
             possible = bool(re.search(r'가능성|수(?:도)?\s*있', certainty_text))
             forecast = bool(re.search(r'예상|예보', certainty_text))
             actual = bool(re.search(r'내립니다|옵니다|오고\s*있|내리고\s*있', certainty_text))
-            if situation['precipitation_certainty'] == 'possible':
+            if situation['precipitation_certainty'] == 'observed':
+                if not actual or possible or forecast:
+                    return 'precipitation_certainty'
+            elif situation['precipitation_certainty'] == 'possible':
                 if not possible or forecast or actual:
                     return 'precipitation_certainty'
             elif not forecast or possible or actual:

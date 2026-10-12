@@ -163,6 +163,18 @@ class PreparationTests(unittest.TestCase):
         self.assertIn('탑승 후 눈이 예상됩니다', text)
         self.assertIn('미끄', text)
 
+    def test_nowcast_current_and_forecast_only_wording_strength(self):
+        current = weather(22, rain='current')
+        current.update(precipitation_certainty='observed', precipitation_type='rain')
+        text = render_advice(assess_weather(current, weather()), '퇴근길', date_key='2026-10-12')
+        self.assertIn('현재 출발지에 비가 내리고 있습니다', text)
+
+        forecast_only = weather(22, rain='forecast_only')
+        forecast_only.update(precipitation_certainty='possible', precipitation_type='rain')
+        text = render_advice(assess_weather(forecast_only, weather()), '퇴근길', date_key='2026-10-12')
+        self.assertIn('출발 시간대 비가 내릴 가능성이 있습니다', text)
+        self.assertNotIn('비가 예상됩니다', text)
+
     def test_templates_stable_and_varied_without_repeating_facts(self):
         for temp in (5, 18, 22, 28):
             for rain in ('none', 'boarding', 'during_trip', 'possible'):
