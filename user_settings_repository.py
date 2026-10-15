@@ -489,19 +489,26 @@ def create_favorite(
                     raise FavoriteMappingError("판교 기본 하차지를 정확히 매핑하지 못했습니다.")
                 if "(하차만)" in str(selection["arrive_stop"]) and (destination[3] or not destination[4]):
                     raise FavoriteMappingError("하차 전용 정류장 정보가 올바르지 않습니다.")
+                # The unique key includes inactive rows. Restore only an inactive
+                # match; an active duplicate must not reset notification choices.
                 cursor.execute(
                     "INSERT INTO favorites "
                     "(user_id, route_id, boarding_route_stop_id, alighting_route_stop_id) "
-                    "VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING RETURNING id",
+                    "VALUES (%s,%s,%s,%s) "
+                    "ON CONFLICT ON CONSTRAINT uq_favorites_selection "
+                    "DO UPDATE SET active=TRUE WHERE favorites.active=FALSE RETURNING id",
                     (user_id, route_id, boarding[0], destination[0]),
                 )
                 inserted = cursor.fetchone()
                 if inserted is None:
                     raise DuplicateFavoriteError("이미 등록된 구간입니다.")
                 favorite_id = inserted[0]
+                # New favorites remain opt-in. An existing notification belongs
+                # to the explicitly restored favorite; preserve its lead time.
                 cursor.execute(
                     "INSERT INTO favorite_notifications (favorite_id, enabled, lead_minutes) "
-                    "VALUES (%s,FALSE,10)",
+                    "VALUES (%s,FALSE,10) "
+                    "ON CONFLICT (favorite_id) DO UPDATE SET enabled=TRUE",
                     (favorite_id,),
                 )
                 return favorite_id
