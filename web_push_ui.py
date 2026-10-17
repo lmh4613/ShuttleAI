@@ -313,6 +313,7 @@ def render_web_push_poc(
     kakao_user_id: int | None = None,
     on_data_changed=None,
     active_device_count: int | None = None,
+    on_initial_inspection=None,
 ) -> None:
     """Render Web Push for one authenticated Kakao user with DB ownership."""
     if kakao_user_id is None:
@@ -375,6 +376,8 @@ def render_web_push_poc(
             st.session_state, kakao_user_id, event,
             on_data_changed=on_data_changed,
         ):
+            if event.get("action") == "inspect" and on_initial_inspection is not None:
+                on_initial_inspection()
             st.rerun()
         subscription = st.session_state.get("web_push_subscription")
 
