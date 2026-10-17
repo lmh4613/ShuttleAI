@@ -187,3 +187,17 @@ def test_favorite_restore_rolls_back_if_notification_write_fails(db):
         create_favorite(123, selection(), transaction_factory=db.transaction)
     assert db.raw.execute('SELECT active FROM favorites').fetchone() == (0,)
     assert list_favorites(123, connection_factory=db.transaction) == []
+
+
+def test_login_flags_and_withdrawal_are_committed(db):
+    first = login(db)
+    assert first == {'user_id': 1, 'created': True, 'reactivated': False}
+    assert not db.raw.in_transaction
+    deactivate_user_account(123, transaction_factory=db.transaction)
+    assert not db.raw.in_transaction
+    assert db.raw.execute('SELECT enabled FROM users').fetchone() == (0,)
+    second = login(db)
+    assert second == {'user_id': 1, 'created': False, 'reactivated': True}
+    assert not db.raw.in_transaction
+    assert db.raw.execute('SELECT enabled FROM users').fetchone() == (1,)
+    assert login(db) == {'user_id': 1, 'created': False, 'reactivated': False}

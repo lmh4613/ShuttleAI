@@ -393,14 +393,107 @@ class AppFlowTests(unittest.TestCase):
         self.assertFalse(any("탈퇴한 계정" in item.value for item in app.info))
         self.assertEqual(self.favorite_records, [])
 
-    def test_newly_created_user_gets_dashboard_without_reactivation_notice(self):
+    def test_newly_created_user_gets_one_time_welcome_notice(self):
         self.repository_mocks["provision_or_sync_login_user"].side_effect.return_value = {
             "user_id": 11, "created": True, "reactivated": False,
         }
         app = self.login(12345)
         self.assertEqual(len(app.exception), 0)
         self.assertFalse(any("탈퇴한 계정" in item.value for item in app.info))
+        self.assertEqual(sum("ShuttleAI 이용을 시작합니다" in item.value for item in app.main.info), 1)
+        self.assertFalse(any("ShuttleAI 이용을 시작합니다" in item.value for item in app.sidebar.info))
         self.repository_mocks["get_user_dashboard_data"].assert_called_once_with(12345)
+        app.run()
+        self.assertFalse(any("ShuttleAI 이용을 시작합니다" in item.value for item in app.info))
+
+    def test_reactivation_notice_survives_push_initialization_rerun(self):
+        import streamlit as st
+        from web_push_ui import handle_web_push_event
+        from test_push_subscription_store import subscription
+
+        self.repository_mocks["provision_or_sync_login_user"].side_effect.return_value = {
+            "user_id": 11, "created": False, "reactivated": True,
+        }
+        observed = []
+
+        def initialize_push(_config, kakao_user_id=None, **_kwargs):
+            observed.append(st.session_state.get("account_reactivated_flash", False))
+            st.session_state.setdefault("web_push_db_ownership", "unknown")
+            if handle_web_push_event(st.session_state, kakao_user_id, {
+                "action": "inspect", "action_id": "initial-inspect",
+                "subscription": subscription(), "browser_status": "loading",
+            }, ownership_loader=lambda *_: "none"):
+                st.rerun()
+
+        with patch("web_push_ui.render_web_push_poc", side_effect=initialize_push):
+            app = self.login(12345)
+            self.assertGreaterEqual(len(observed), 2)
+            self.assertEqual(observed[:2], [True, True])
+            self.assertTrue(any("탈퇴한 계정" in item.value for item in app.main.info))
+            app.run()
+            self.assertFalse(any("탈퇴한 계정" in item.value for item in app.info))
+
+    def test_signup_withdraw_rejoin_and_active_login_notices(self):
+        provision = self.repository_mocks["provision_or_sync_login_user"]
+        provision.side_effect = [
+            {"user_id": 11, "created": True, "reactivated": False},
+            {"user_id": 11, "created": False, "reactivated": True},
+            {"user_id": 11, "created": False, "reactivated": False},
+        ]
+        app = self.login(12345)
+        self.assertTrue(any("ShuttleAI 이용을 시작합니다" in item.value for item in app.main.info))
+        app.checkbox(key="confirm_account_withdrawal").check().run()
+        app.button(key="deactivate_account_button").click().run()
+        self.assertIsNone(app.session_state["user_info"])
+        self.repository_mocks["deactivate_user_account"].assert_called_once_with(12345)
+        app = self.login(12345)
+        self.assertEqual(sum("탈퇴한 계정" in item.value for item in app.main.info), 1)
+        app.run()
+        self.assertFalse(any("탈퇴한 계정" in item.value for item in app.info))
+        app.button(key="mobile_logout").click().run()
+        app = self.login(12345)
+        self.assertFalse(any("탈퇴한 계정" in item.value or "ShuttleAI 이용을 시작합니다" in item.value
+                             for item in app.info))
+
+    def test_account_notices_survive_delayed_browser_inspection_only(self):
+        from types import SimpleNamespace
+        from web_push_ui import handle_web_push_event
+        from test_push_subscription_store import subscription
+
+        for kind, message in (("created", "ShuttleAI 이용을 시작합니다"),
+                              ("reactivated", "탈퇴한 계정")):
+            with self.subTest(kind=kind):
+                self.repository_mocks["provision_or_sync_login_user"].side_effect.return_value = {
+                    "user_id": 11, "created": kind == "created", "reactivated": kind == "reactivated",
+                }
+                bridge = Mock(return_value=SimpleNamespace(event=None))
+                def handle(session, uid, event, **kwargs):
+                    return handle_web_push_event(session, uid, event,
+                        ownership_loader=lambda *_: "none", **kwargs)
+                with patch("web_push_ui._register_components", return_value=(bridge, "/sw.js", "/")), \
+                     patch("web_push_ui.handle_web_push_event", side_effect=handle):
+                    app = self.login(12345)
+                    self.assertTrue(any(message in item.value for item in app.main.info))
+                    # Browser JS reports its existing subscription AFTER the first page render.
+                    bridge.return_value = SimpleNamespace(event={
+                        "action": "inspect", "action_id": "late-inspect",
+                        "subscription": subscription(), "browser_status": "loading",
+                    })
+                    app.run()
+                    self.assertEqual(len(app.exception), 0)
+                    self.assertEqual(sum(message in item.value for item in app.main.info), 1)
+                    app.run()
+                    self.assertFalse(any(message in item.value for item in app.info))
+
+    def test_account_notice_is_discarded_in_admin_preview(self):
+        app = self.login(5070327065)
+        app.session_state["account_created_flash"] = True
+        app.session_state["account_reactivated_flash"] = True
+        next(b for b in app.button if b.label == "일반 사용자 모드로 보기").click().run()
+        self.assertFalse(any("탈퇴한 계정" in item.value or "ShuttleAI 이용을 시작합니다" in item.value
+                             for item in app.info))
+        self.assertNotIn("account_created_flash", app.session_state.filtered_state)
+        self.assertNotIn("account_reactivated_flash", app.session_state.filtered_state)
 
     def test_account_withdrawal_requires_confirmation_and_ends_session(self):
         app = self.login(12345)
