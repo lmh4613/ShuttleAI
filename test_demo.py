@@ -193,7 +193,7 @@ class AppFlowTests(unittest.TestCase):
         }
         self.route_loader_mock = self.route_mocks["load_routes_for_ui"]
 
-        def create_favorite(_user_id, item):
+        def create_favorite(_user_id, item, *, return_details=False):
             identity = (item["route_name"], item["board_stop"], item["arrive_stop"])
             if any((entry["route_name"], entry["board_stop"], entry["arrive_stop"]) == identity
                    for entry in self.favorite_records):
@@ -203,6 +203,9 @@ class AppFlowTests(unittest.TestCase):
                             notify_enabled=False, notify_min=10)
             self.next_favorite_id += 1
             self.favorite_records.append(favorite)
+            if return_details:
+                return {"favorite_id": favorite["favorite_id"], "notification_restored": False, "notification_enabled": False,
+                        "lead_minutes": 10}
             return favorite["favorite_id"]
 
         def delete_favorite(_user_id, favorite_id):
@@ -376,124 +379,122 @@ class AppFlowTests(unittest.TestCase):
         self.assertEqual(data["access_token"], "test")
         self.assertEqual(data["refresh_token"], "test-refresh")
 
-    def test_reactivated_user_gets_one_time_account_restart_notice(self):
-        self.repository_mocks["provision_or_sync_login_user"].side_effect.return_value = {
-            "user_id": 11, "created": False, "reactivated": True,
-        }
-        app = self.login(12345)
+    def assert_notice(self, app, kind):
         self.assertEqual(len(app.exception), 0)
-        notice = [item.value for item in app.info if "탈퇴한 계정" in item.value]
-        self.assertEqual(len(notice), 1)
-        self.assertIn("다시 시작", notice[0])
-        self.assertIn("즐겨찾기", notice[0])
-        self.assertIn("기기 알림", notice[0])
-        self.assertNotIn("account_reactivated_flash", app.session_state.filtered_state)
+        expected = "이전 즐겨찾기와 기기 알림" if kind == "reactivated" else "즐겨찾는 출퇴근 노선"
+        self.assertEqual(sum(expected in item.value for item in app.markdown), 1)
+        self.assertEqual(len([b for b in app.button if b.key == "confirm_account_notice"]), 1)
 
-        app.run()
-        self.assertFalse(any("탈퇴한 계정" in item.value for item in app.info))
-        self.assertEqual(self.favorite_records, [])
-
-    def test_newly_created_user_gets_one_time_welcome_notice(self):
-        self.repository_mocks["provision_or_sync_login_user"].side_effect.return_value = {
-            "user_id": 11, "created": True, "reactivated": False,
-        }
-        app = self.login(12345)
-        self.assertEqual(len(app.exception), 0)
-        self.assertFalse(any("탈퇴한 계정" in item.value for item in app.info))
-        self.assertEqual(sum("ShuttleAI 이용을 시작합니다" in item.value for item in app.main.info), 1)
-        self.assertFalse(any("ShuttleAI 이용을 시작합니다" in item.value for item in app.sidebar.info))
-        self.repository_mocks["get_user_dashboard_data"].assert_called_once_with(12345)
-        app.run()
-        self.assertFalse(any("ShuttleAI 이용을 시작합니다" in item.value for item in app.info))
-
-    def test_reactivation_notice_survives_push_initialization_rerun(self):
+    def test_account_dialogs_persist_until_confirmation(self):
         import streamlit as st
-        from web_push_ui import handle_web_push_event
-        from test_push_subscription_store import subscription
 
-        self.repository_mocks["provision_or_sync_login_user"].side_effect.return_value = {
-            "user_id": 11, "created": False, "reactivated": True,
-        }
-        observed = []
-
-        def initialize_push(_config, kakao_user_id=None, **_kwargs):
-            observed.append(st.session_state.get("account_reactivated_flash", False))
-            st.session_state.setdefault("web_push_db_ownership", "unknown")
-            if handle_web_push_event(st.session_state, kakao_user_id, {
-                "action": "inspect", "action_id": "initial-inspect",
-                "subscription": subscription(), "browser_status": "loading",
-            }, ownership_loader=lambda *_: "none"):
-                st.rerun()
-
-        with patch("web_push_ui.render_web_push_poc", side_effect=initialize_push):
-            app = self.login(12345)
-            self.assertGreaterEqual(len(observed), 2)
-            self.assertEqual(observed[:2], [True, True])
-            self.assertTrue(any("탈퇴한 계정" in item.value for item in app.main.info))
-            app.run()
-            self.assertFalse(any("탈퇴한 계정" in item.value for item in app.info))
-
-    def test_signup_withdraw_rejoin_and_active_login_notices(self):
-        provision = self.repository_mocks["provision_or_sync_login_user"]
-        provision.side_effect = [
-            {"user_id": 11, "created": True, "reactivated": False},
-            {"user_id": 11, "created": False, "reactivated": True},
-            {"user_id": 11, "created": False, "reactivated": False},
-        ]
-        app = self.login(12345)
-        self.assertTrue(any("ShuttleAI 이용을 시작합니다" in item.value for item in app.main.info))
-        app.checkbox(key="confirm_account_withdrawal").check().run()
-        app.button(key="deactivate_account_button").click().run()
-        self.assertIsNone(app.session_state["user_info"])
-        self.repository_mocks["deactivate_user_account"].assert_called_once_with(12345)
-        app = self.login(12345)
-        self.assertEqual(sum("탈퇴한 계정" in item.value for item in app.main.info), 1)
-        app.run()
-        self.assertFalse(any("탈퇴한 계정" in item.value for item in app.info))
-        app.button(key="mobile_logout").click().run()
-        app = self.login(12345)
-        self.assertFalse(any("탈퇴한 계정" in item.value or "ShuttleAI 이용을 시작합니다" in item.value
-                             for item in app.info))
-
-    def test_account_notices_survive_delayed_browser_inspection_only(self):
-        from types import SimpleNamespace
-        from web_push_ui import handle_web_push_event
-        from test_push_subscription_store import subscription
-
-        for kind, message in (("created", "ShuttleAI 이용을 시작합니다"),
-                              ("reactivated", "탈퇴한 계정")):
+        for kind in ("created", "reactivated"):
             with self.subTest(kind=kind):
                 self.repository_mocks["provision_or_sync_login_user"].side_effect.return_value = {
                     "user_id": 11, "created": kind == "created", "reactivated": kind == "reactivated",
                 }
-                bridge = Mock(return_value=SimpleNamespace(event=None))
+                with patch("streamlit.dialog", wraps=st.dialog) as dialog:
+                    app = self.login(12345)
+                title = ("ShuttleAI 이용이 다시 시작되었습니다" if kind == "reactivated"
+                         else "ShuttleAI에 오신 것을 환영합니다")
+                dialog.assert_called_once_with(title, dismissible=False)
+                self.assert_notice(app, kind)
+                for _ in range(2):
+                    app.run()
+                    self.assert_notice(app, kind)
+                app.button(key="confirm_account_notice").click().run()
+                self.assertEqual(len(app.exception), 0)
+                self.assertNotIn("account_" + kind + "_flash", app.session_state.filtered_state)
+                app.run()
+                self.assertFalse(any(b.key == "confirm_account_notice" for b in app.button))
+
+    def test_account_dialogs_survive_push_initialization_and_delayed_inspection(self):
+        from types import SimpleNamespace
+        from web_push_ui import handle_web_push_event
+        from test_push_subscription_store import subscription
+
+        for kind in ("created", "reactivated"):
+            with self.subTest(kind=kind):
+                self.repository_mocks["provision_or_sync_login_user"].side_effect.return_value = {
+                    "user_id": 11, "created": kind == "created", "reactivated": kind == "reactivated",
+                }
+                bridge = Mock(return_value=SimpleNamespace(event={
+                    "action": "inspect", "action_id": "initial-inspect",
+                    "subscription": subscription(), "browser_status": "loading",
+                }))
                 def handle(session, uid, event, **kwargs):
                     return handle_web_push_event(session, uid, event,
                         ownership_loader=lambda *_: "none", **kwargs)
                 with patch("web_push_ui._register_components", return_value=(bridge, "/sw.js", "/")), \
                      patch("web_push_ui.handle_web_push_event", side_effect=handle):
                     app = self.login(12345)
-                    self.assertTrue(any(message in item.value for item in app.main.info))
-                    # Browser JS reports its existing subscription AFTER the first page render.
+                    self.assert_notice(app, kind)
                     bridge.return_value = SimpleNamespace(event={
                         "action": "inspect", "action_id": "late-inspect",
                         "subscription": subscription(), "browser_status": "loading",
                     })
                     app.run()
-                    self.assertEqual(len(app.exception), 0)
-                    self.assertEqual(sum(message in item.value for item in app.main.info), 1)
+                    self.assert_notice(app, kind)
+                    app.button(key="confirm_account_notice").click().run()
                     app.run()
-                    self.assertFalse(any(message in item.value for item in app.info))
+                    self.assertFalse(any(b.key == "confirm_account_notice" for b in app.button))
+
+    def test_signup_withdraw_rejoin_and_active_login_notices(self):
+        self.repository_mocks["provision_or_sync_login_user"].side_effect = [
+            {"user_id": 11, "created": True, "reactivated": False},
+            {"user_id": 11, "created": False, "reactivated": True},
+            {"user_id": 11, "created": False, "reactivated": False},
+        ]
+        app = self.login(12345)
+        self.assert_notice(app, "created")
+        app.button(key="confirm_account_notice").click().run()
+        app.checkbox(key="confirm_account_withdrawal").check().run()
+        app.button(key="deactivate_account_button").click().run()
+        self.assertIsNone(app.session_state["user_info"])
+        self.repository_mocks["deactivate_user_account"].assert_called_once_with(12345)
+        app = self.login(12345)
+        self.assert_notice(app, "reactivated")
+        app.button(key="mobile_logout").click().run()
+        self.assertNotIn("account_reactivated_flash", app.session_state.filtered_state)
+        app = self.login(12345)
+        self.assertFalse(any(b.key == "confirm_account_notice" for b in app.button))
 
     def test_account_notice_is_discarded_in_admin_preview(self):
         app = self.login(5070327065)
         app.session_state["account_created_flash"] = True
         app.session_state["account_reactivated_flash"] = True
         next(b for b in app.button if b.label == "일반 사용자 모드로 보기").click().run()
-        self.assertFalse(any("탈퇴한 계정" in item.value or "ShuttleAI 이용을 시작합니다" in item.value
-                             for item in app.info))
+        self.assertFalse(any(b.key == "confirm_account_notice" for b in app.button))
         self.assertNotIn("account_created_flash", app.session_state.filtered_state)
         self.assertNotIn("account_reactivated_flash", app.session_state.filtered_state)
+
+    def test_favorite_success_distinguishes_restored_settings(self):
+        for restored in (False, True):
+            with self.subTest(restored=restored):
+                app = self.login(12345)
+                self.repository_mocks["create_favorite"].side_effect = None
+                self.repository_mocks["create_favorite"].return_value = {
+                    "favorite_id": 44, "notification_restored": restored, "notification_enabled": restored, "lead_minutes": 20,
+                }
+                next(b for b in app.button if b.label == "⭐ 통합 즐겨찾기 추가").click().run()
+                self.assertEqual(len(app.exception), 0)
+                messages = [item.value for item in app.success]
+                expected = ("이전에 사용하던 즐겨찾기와 알림 설정을 복원했습니다. 알림: 사용 / 출발 20분 전"
+                            if restored else "통합 즐겨찾기에 추가되었습니다!")
+                self.assertIn(expected, messages)
+                if not restored:
+                    self.assertFalse(any("복원" in message for message in messages))
+                app.run()
+                self.assertFalse(any(expected == item.value for item in app.success))
+
+    def test_active_duplicate_does_not_show_favorite_restoration_success(self):
+        from user_settings_repository import DuplicateFavoriteError
+        app = self.login(12345)
+        self.repository_mocks["create_favorite"].side_effect = DuplicateFavoriteError("이미 등록된 구간입니다.")
+        next(b for b in app.button if b.label == "⭐ 통합 즐겨찾기 추가").click().run()
+        self.assertEqual(len(app.exception), 0)
+        self.assertTrue(any("이미 등록된 구간" in item.value for item in app.warning))
+        self.assertFalse(any("복원" in item.value or "추가되었습니다" in item.value for item in app.success))
 
     def test_account_withdrawal_requires_confirmation_and_ends_session(self):
         app = self.login(12345)

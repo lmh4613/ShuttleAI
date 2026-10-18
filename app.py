@@ -590,7 +590,6 @@ if ("code" in query_params or "error" in query_params) and st.session_state["use
                         st.session_state["preview_user"] = False
                         st.session_state.pop("account_created_flash", None)
                         st.session_state.pop("account_reactivated_flash", None)
-                        st.session_state.pop("account_notice_last_rendered", None)
                         if login_sync and login_sync.get("reactivated"):
                             st.session_state["account_reactivated_flash"] = True
                         elif login_sync and login_sync.get("created"):
@@ -631,7 +630,7 @@ if restored:
 def logout_user_session():
     st.session_state.pop("account_created_flash", None)
     st.session_state.pop("account_reactivated_flash", None)
-    st.session_state.pop("account_notice_last_rendered", None)
+    st.session_state.pop("favorite_success", None)
     invalidate_user_screen_data(st.session_state)
     st.session_state["user_info"] = None
     st.session_state["is_admin"] = False
@@ -664,11 +663,25 @@ def render_account_deactivation_controls():
                 logout_user_session()
 
 
-def preserve_account_notice_for_push_inspection():
-    """A browser's automatic inspection is not a user dismissing the notice."""
-    previous = st.session_state.get("account_notice_last_rendered")
-    if previous in ("account_created_flash", "account_reactivated_flash"):
-        st.session_state[previous] = True
+def render_account_notice():
+    reactivated = st.session_state.get("account_reactivated_flash", False)
+    title = ("ShuttleAI 이용이 다시 시작되었습니다" if reactivated
+             else "ShuttleAI에 오신 것을 환영합니다")
+
+    @st.dialog(title, dismissible=False)
+    def notice():
+        if reactivated:
+            st.write("이전 즐겨찾기와 기기 알림은 재가입만으로 자동 복원되지 않습니다. "
+                     "이전에 사용하던 경로를 다시 추가하면 기존 알림 설정이 함께 복원될 수 있습니다.")
+        else:
+            st.write("즐겨찾는 출퇴근 노선을 등록하고 기기 알림을 설정하면 "
+                     "탑승 시간에 맞춰 날씨 정보를 받을 수 있습니다.")
+        if st.button("확인", key="confirm_account_notice"):
+            st.session_state.pop("account_created_flash", None)
+            st.session_state.pop("account_reactivated_flash", None)
+            st.rerun()
+
+    notice()
 
 
 login_links = []
@@ -721,7 +734,7 @@ st.title("🚌 AI 셔틀버스 날씨 알림 (탑승·하차 통합 안내)")
 
 # Reserve the main-page location, but consume the flash only after a complete
 # render. Push initialization below can rerun before the page is finished.
-account_notice = st.empty()
+favorite_notice = st.empty()
 
 with st.container(key="mobile_auth"):
     if st.session_state["user_info"] is None:
@@ -1158,9 +1171,16 @@ with main_tab_target:
                                 raise UserSettingsError(user_settings_error)
                             if stop_pair_validation_error:
                                 raise UserSettingsError(stop_pair_validation_error)
-                            create_favorite(user_id, new_item)
+                            result = create_favorite(user_id, new_item, return_details=True)
                             invalidate_user_screen_data(st.session_state, user_id)
-                            st.success("통합 즐겨찾기에 추가되었습니다!")
+                            if result["notification_restored"]:
+                                st.session_state["favorite_success"] = (
+                                    "이전에 사용하던 즐겨찾기와 알림 설정을 복원했습니다. "
+                                    f"알림: {'사용' if result['notification_enabled'] else '미사용'} / "
+                                    f"출발 {result['lead_minutes']}분 전"
+                                )
+                            else:
+                                st.session_state["favorite_success"] = "통합 즐겨찾기에 추가되었습니다!"
                             st.rerun()
                         except DuplicateFavoriteError as exc:
                             st.warning(str(exc))
@@ -1299,7 +1319,6 @@ with main_tab_target:
             render_web_push_poc(
                 WEB_PUSH_CONFIG,
                 kakao_user_id=st.session_state["user_info"]["id"],
-                on_initial_inspection=preserve_account_notice_for_push_inspection,
                 on_data_changed=lambda: invalidate_user_screen_data(
                     st.session_state, st.session_state["user_info"]["id"]
                 ),
@@ -1386,19 +1405,13 @@ with main_tab_target:
 
 render_login_links()
 
-reactivated_notice = st.session_state.pop("account_reactivated_flash", False)
-created_notice = st.session_state.pop("account_created_flash", False)
-st.session_state.pop("account_notice_last_rendered", None)
 if st.session_state["user_info"] and not st.session_state["preview_user"]:
-    if reactivated_notice:
-        st.session_state["account_notice_last_rendered"] = "account_reactivated_flash"
-        account_notice.info(
-            "탈퇴한 계정으로 다시 로그인하여 ShuttleAI 이용이 다시 시작되었습니다. "
-            "이전 즐겨찾기와 기기 알림은 자동으로 복원되지 않습니다. "
-            "필요한 항목을 다시 설정해 주세요."
-        )
-    elif created_notice:
-        st.session_state["account_notice_last_rendered"] = "account_created_flash"
-        account_notice.info(
-            "ShuttleAI 이용을 시작합니다. 즐겨찾기와 기기 알림을 설정해 주세요."
-        )
+    if message := st.session_state.pop("favorite_success", None):
+        favorite_notice.success(message)
+    if (st.session_state.get("account_reactivated_flash")
+            or st.session_state.get("account_created_flash")):
+        render_account_notice()
+else:
+    st.session_state.pop("account_created_flash", None)
+    st.session_state.pop("account_reactivated_flash", None)
+    st.session_state.pop("favorite_success", None)
