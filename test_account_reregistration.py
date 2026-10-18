@@ -175,7 +175,8 @@ def test_withdraw_rejoin_and_explicit_favorite_and_push_registration(db):
     assert db.raw.execute('SELECT count(*) FROM notification_active_days').fetchone() == (2,)
 
 
-def test_favorite_restore_rolls_back_if_notification_write_fails(db):
+@pytest.mark.parametrize("return_details", [False, True])
+def test_favorite_restore_rolls_back_if_notification_write_fails(db, return_details):
     login(db)
     create_favorite(123, selection(), transaction_factory=db.transaction)
     deactivate_user_account(123, transaction_factory=db.transaction)
@@ -184,7 +185,7 @@ def test_favorite_restore_rolls_back_if_notification_write_fails(db):
                       BEGIN SELECT RAISE(ABORT, 'test failure'); END''')
     from user_settings_repository import UserSettingsError
     with pytest.raises(UserSettingsError):
-        create_favorite(123, selection(), transaction_factory=db.transaction)
+        create_favorite(123, selection(), return_details=return_details, transaction_factory=db.transaction)
     assert db.raw.execute('SELECT active FROM favorites').fetchone() == (0,)
     assert list_favorites(123, connection_factory=db.transaction) == []
 
@@ -201,3 +202,34 @@ def test_login_flags_and_withdrawal_are_committed(db):
     assert not db.raw.in_transaction
     assert db.raw.execute('SELECT enabled FROM users').fetchone() == (1,)
     assert login(db) == {'user_id': 1, 'created': False, 'reactivated': False}
+
+
+def test_favorite_creation_details_only_report_actual_notification_restoration(db):
+    login(db)
+    first = create_favorite(123, selection(), return_details=True, transaction_factory=db.transaction)
+    assert first == {"favorite_id": 1, "notification_restored": False, "notification_enabled": False, "lead_minutes": 10}
+    db.raw.execute('UPDATE favorite_notifications SET enabled=TRUE, lead_minutes=20')
+    db.raw.commit()
+    deactivate_user_account(123, transaction_factory=db.transaction)
+    assert login(db)["reactivated"] is True
+    assert list_favorites(123, connection_factory=db.transaction) == []
+    restored = create_favorite(123, selection(), return_details=True, transaction_factory=db.transaction)
+    assert restored == {"favorite_id": 1, "notification_restored": True, "notification_enabled": True, "lead_minutes": 20}
+    assert db.raw.execute('SELECT active FROM favorites').fetchall() == [(1,)]
+    assert db.raw.execute('SELECT enabled, lead_minutes FROM favorite_notifications').fetchall() == [(1, 20)]
+    with pytest.raises(DuplicateFavoriteError):
+        create_favorite(123, selection(), return_details=True, transaction_factory=db.transaction)
+    assert db.raw.execute('SELECT count(*) FROM favorites').fetchone() == (1,)
+    assert db.raw.execute('SELECT count(*) FROM favorite_notifications').fetchone() == (1,)
+
+
+def test_reactivated_favorite_without_previous_notification_is_not_reported_as_restored(db):
+    login(db)
+    create_favorite(123, selection(), transaction_factory=db.transaction)
+    db.raw.execute('DELETE FROM favorite_notifications')
+    db.raw.commit()
+    deactivate_user_account(123, transaction_factory=db.transaction)
+    login(db)
+    result = create_favorite(123, selection(), return_details=True, transaction_factory=db.transaction)
+    assert result["notification_restored"] is False
+    assert db.raw.execute('SELECT enabled, lead_minutes FROM favorite_notifications').fetchall() == [(0, 10)]

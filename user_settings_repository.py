@@ -454,7 +454,9 @@ def create_favorite(
     selection: Mapping,
     *,
     transaction_factory: Callable = database_transaction,
-) -> int:
+    return_details: bool = False,
+) -> int | dict:
+    """Create/restore a favorite; optionally return committed notification details."""
     required = {"region", "route_name", "trip_type", "board_stop", "board_lat", "board_lon",
                 "arrive_stop", "arrive_lat", "arrive_lon"}
     if not required.issubset(selection):
@@ -503,14 +505,30 @@ def create_favorite(
                 if inserted is None:
                     raise DuplicateFavoriteError("이미 등록된 구간입니다.")
                 favorite_id = inserted[0]
+                previous_notification = None
+                if return_details:
+                    cursor.execute(
+                        "SELECT enabled, lead_minutes FROM favorite_notifications WHERE favorite_id=%s",
+                        (favorite_id,),
+                    )
+                    previous_notification = cursor.fetchone()
                 # New favorites remain opt-in. An existing notification belongs
                 # to the explicitly restored favorite; preserve its lead time.
                 cursor.execute(
                     "INSERT INTO favorite_notifications (favorite_id, enabled, lead_minutes) "
                     "VALUES (%s,FALSE,10) "
-                    "ON CONFLICT (favorite_id) DO UPDATE SET enabled=TRUE",
+                    "ON CONFLICT (favorite_id) DO UPDATE SET enabled=TRUE"
+                    + (" RETURNING enabled, lead_minutes" if return_details else ""),
                     (favorite_id,),
                 )
+                if return_details:
+                    enabled, lead_minutes = cursor.fetchone()
+                    return {
+                        "favorite_id": favorite_id,
+                        "notification_restored": previous_notification is not None,
+                        "notification_enabled": bool(enabled),
+                        "lead_minutes": lead_minutes,
+                    }
                 return favorite_id
     except UserSettingsError:
         raise
