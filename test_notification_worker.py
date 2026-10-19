@@ -159,8 +159,7 @@ def test_one_user_multiple_devices_and_same_logical_notification_dedup():
     assert sender.call_count == 2
     assert [call.kwargs["urgency"] for call in sender.call_args_list] == ["high", "high"]
     first_body = sender.call_args_list[0].args[3]
-    assert first_body.startswith("08:00 탑승 예정 ·")
-    assert "탑승지" not in first_body and "하차지" not in first_body
+    assert first_body == "08:00 · 탑승지 → 하차지\n얇은 겉옷을 챙기세요."
     cycle([current], push_sender=sender, sent=sent, attempts=attempts, history=history)
     assert sender.call_count == 2
     assert history.runs[1]["status"] == "SUCCESS"
@@ -477,3 +476,59 @@ def test_duplicate_worker_start_is_blocked(monkeypatch):
     assert not worker.start_notification_worker(**args)
     assert len(created) == 1
     assert created[0].kwargs["daemon"] is True
+
+
+@pytest.mark.parametrize("trip_type, trip, hour", [("morning", "출근", 8), ("evening", "퇴근", 18)])
+def test_push_route_and_boarding_time_preserve_advice_and_kakao_format(trip_type, trip, hour):
+    from dataclasses import replace
+
+    current = replace(target(devices=[device(1)], trip_type=trip_type, scheduled=time(hour, 5)),
+                      boarding_name="기업성장센터", destination_name="판교")
+    sender = Mock(return_value=(True, "ok"))
+    cycle([current], push_sender=sender, now=datetime(2026, 9, 30, hour - 1, 55, tzinfo=KST))
+    assert sender.call_count == 1
+    assert sender.call_args.args[2:4] == (
+        f"ShuttleAI {trip} 알림",
+        f"{hour:02}:05 · 기업성장센터 → 판교\n얇은 겉옷을 챙기세요.",
+    )
+    kakao_sender = Mock(return_value=(200, "ok"))
+    cycle([replace(current, delivery_channel="KAKAO")], kakao_sender=kakao_sender,
+          now=datetime(2026, 9, 30, hour - 1, 55, tzinfo=KST))
+    assert kakao_sender.call_count == 1
+    assert kakao_sender.call_args.args[1:3] == (
+        "[노선 A] 탑승·하차 날씨 알림",
+        "🚍 [셔틀 출발 10분 전 알림]\n\n"
+        f"노선: 노선 A ({trip}길)\n\n"
+        f"🟢 [탑승] 기업성장센터 ({hour:02}:05)\n"
+        "• 기온: 19°C | 상태: 맑음\n\n"
+        "🔴 [하차] 판교\n"
+        "• 기온: 19°C | 상태: 맑음\n\n"
+        "🤖 **[AI 코멘트]**\n얇은 겉옷을 챙기세요.",
+    )
+
+
+def test_long_unicode_stop_names_survive_push_payload_without_truncation():
+    import json
+    from dataclasses import replace
+    from web_push import send_web_push
+
+    boarding_name = '기업성장센터 "동문" 🚌 ' * 8
+    destination_name = '판교 제2테크노밸리 (하차만) ' * 8
+    current = replace(target(devices=[device(1)]), boarding_name=boarding_name,
+                      destination_name=destination_name)
+    transport = Mock()
+    def sender(subscription, config, title, body, url, **kwargs):
+        return send_web_push(subscription, config, title, body, url, sender=transport, **kwargs)
+    result = cycle([current], push_sender=sender)
+    assert result["push_success"] == 1
+    payload = json.loads(transport.call_args.kwargs["data"])
+    assert payload["body"] == f"08:00 · {boarding_name} → {destination_name}\n얇은 겉옷을 챙기세요."
+
+
+def test_scheduled_push_test_message_format_unchanged():
+    assert worker._scheduled_push_test_message(
+        scheduled_test(10, urgency="high"), datetime(2026, 9, 30, 18, 30, 2, tzinfo=KST),
+    ) == (
+        "[ShuttleAI 예약 Push 테스트]",
+        "예약: 18:30:00\n서버 발송: 18:30:02\nTTL: 60s\nUrgency: high\n메시지: 모바일 오프라인 수신 테스트",
+    )

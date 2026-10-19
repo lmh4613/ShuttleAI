@@ -93,7 +93,7 @@ def _messages(target, boarding, boarding_weather, destination_weather, comment):
     trip = "퇴근" if target.trip_type == "evening" else "출근"
     boarding_time = boarding.strftime("%H:%M")
     push_title = f"ShuttleAI {trip} 알림"
-    push_body = f"{boarding_time} 탑승 예정 · {comment}"
+    push_body = f"{boarding_time} · {target.boarding_name} → {target.destination_name}\n{comment}"
     kakao_title = f"[{target.route_name}] 탑승·하차 날씨 알림"
     kakao_body = (
         f"🚍 [셔틀 출발 {target.lead_minutes}분 전 알림]\n\n"
