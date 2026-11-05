@@ -8,10 +8,14 @@ import streamlit.components.v1 as components_v1
 
 from push_subscription_store import (
     OWNERSHIP_CURRENT,
+    OWNERSHIP_EXPIRED,
+    OWNERSHIP_REVOKED,
     OWNERSHIP_NONE,
     OWNERSHIP_OTHER,
     PushSubscriptionError,
+    PushSubscriptionExpiredError,
     count_active_push_subscriptions,
+    canonicalize_subscription,
     deactivate_all_subscriptions,
     deactivate_subscription,
     register_subscription,
@@ -31,6 +35,10 @@ def web_push_display_state(has_browser_subscription, ownership=DB_UNKNOWN):
         return "NO_BROWSER_SUBSCRIPTION"
     if ownership == DB_UNAVAILABLE:
         return "DB_UNAVAILABLE"
+    if ownership == OWNERSHIP_EXPIRED:
+        return "EXPIRED"
+    if ownership == OWNERSHIP_REVOKED:
+        return "REVOKED"
     if ownership == OWNERSHIP_CURRENT:
         return "REGISTERED_TO_CURRENT_USER"
     return "REGISTERED_TO_OTHER_USER"
@@ -127,6 +135,7 @@ export default function(component) {
   function emitEvent(action, state, subscription = null, removed = null) {
     setStateValue('event', {
       action,
+      owner_context: data.owner_context,
       browser_status: state,
       subscription: subscription ? subscription.toJSON() : null,
       unsubscribed_subscription: removed ? removed.toJSON() : null,
@@ -139,14 +148,17 @@ export default function(component) {
     subscribeButton.hidden = ['registered', 'db_unavailable', 'loading'].includes(state);
     unsubscribeButton.hidden = !['registered', 'browser_only'].includes(state);
     subscribeButton.disabled = state === 'denied' || state === 'unsupported' || !data.config_ready;
-    subscribeButton.textContent = state === 'browser_only'
+    subscribeButton.textContent = state === 'expired' ? '알림 다시 등록' : state === 'browser_only'
       ? '현재 계정에 이 기기 알림 연결' : '이 기기에서 알림 받기';
 
     const labels = {
       loading: '현재 상태: 브라우저 알림 상태를 확인하고 있습니다.',
       unregistered: '현재 상태: 알림이 등록되지 않았습니다.',
       unsubscribed: '현재 상태: 알림이 등록되지 않았습니다.',
-      registered: '현재 상태: 이 기기 알림 등록됨',
+      registered: '현재 기기의 알림이 정상적으로 등록되어 있습니다.',
+      expired: '이 기기의 알림 구독이 만료되어 알림을 받을 수 없습니다. 아래 버튼을 눌러 다시 등록해 주세요.',
+      renewal_failed: '알림 재등록에 실패했습니다. 브라우저 알림 권한 및 연결 상태를 확인해 주세요.',
+      renewal_unsupported: '이 브라우저에서는 알림 구독 재발급을 지원하지 않습니다. 브라우저를 업데이트하거나 다른 브라우저를 이용해 주세요.',
       browser_only: '현재 상태: 브라우저 알림을 현재 계정에 연결해야 합니다.',
       db_unavailable: '현재 상태: 기기 알림 등록 정보를 확인할 수 없습니다.',
       denied: '현재 상태: 브라우저에서 알림 권한이 차단되어 있습니다.',
@@ -168,9 +180,10 @@ export default function(component) {
     if (Notification.permission === 'denied') return showState('denied');
     const registration = await findRegistration();
     const subscription = registration ? await registration.pushManager.getSubscription() : null;
-    if (!subscription) return showState('unregistered');
+    if (!subscription) return showState('unregistered', null, data.server_endpoint ? 'inspect_missing' : '');
     if (data.server_state === 'unavailable') return showState('db_unavailable', subscription);
-    if (data.server_state === 'unknown') return showState('loading', subscription, 'inspect');
+    if (data.server_state === 'unknown' || subscription.endpoint !== data.server_endpoint) return showState('loading', subscription, 'inspect');
+    if (data.server_state === 'expired') return showState('expired', subscription);
     showState(
       data.server_state === 'current' ? 'registered' : 'browser_only',
       subscription
@@ -191,10 +204,15 @@ export default function(component) {
     return true;
   }
 
+  let busy = false;
   subscribeButton.onclick = async () => {
+    if (busy) return;
+    const renewing = ['expired', 'other_expired'].includes(data.server_state);
     if (!supported || !data.config_ready || Notification.permission === 'denied') {
       return inspectState();
     }
+    busy = true;
+    subscribeButton.disabled = true;
     try {
       const permission = Notification.permission === 'granted'
         ? 'granted' : await Notification.requestPermission();
@@ -203,13 +221,28 @@ export default function(component) {
         data.service_worker_url, { scope: data.service_worker_scope }
       ));
       const existing = await registration.pushManager.getSubscription();
-      const subscription = existing || await registration.pushManager.subscribe({
+      if (renewing && (typeof registration.pushManager.subscribe !== 'function' ||
+          (existing && typeof existing.unsubscribe !== 'function'))) {
+        return showState('renewal_unsupported');
+      }
+      if (renewing && existing) {
+        await existing.unsubscribe();
+        if (await registration.pushManager.getSubscription()) throw new Error('unsubscribe_failed');
+      }
+      const subscription = (!renewing && existing) || await registration.pushManager.subscribe({
         userVisibleOnly: true,
         applicationServerKey: applicationServerKey(data.public_key)
       });
-      showState('loading', subscription, 'register');
+      if (renewing && (subscription.endpoint === data.server_endpoint ||
+          (existing && subscription.endpoint === existing.endpoint))) {
+        throw new Error('same_expired_endpoint');
+      }
+      showState('loading', subscription, renewing ? 'reregister' : 'register', existing);
     } catch (error) {
-      showState('error');
+      showState(renewing ? 'renewal_failed' : 'error');
+    } finally {
+      busy = false;
+      subscribeButton.disabled = !supported || !data.config_ready || Notification.permission === 'denied';
     }
   };
 
@@ -261,10 +294,14 @@ def handle_web_push_event(
     """Process one coherent browser event; return whether server state needs redraw."""
     if not isinstance(event, dict):
         return False
+    if event.get("owner_context", kakao_user_id) != kakao_user_id:
+        return False
     action_id = event.get("action_id", "")
-    if not action_id or action_id == session.get("web_push_last_action_id"):
+    processed = session.get("web_push_processed_actions", [])
+    if not action_id or action_id == session.get("web_push_last_action_id") or action_id in processed:
         return False
     session["web_push_last_action_id"] = action_id
+    session["web_push_processed_actions"] = (processed + [action_id])[-64:]
     previous_subscription = session.get("web_push_subscription")
     sync_subscription(
         session,
@@ -275,16 +312,29 @@ def handle_web_push_event(
     subscription = session.get("web_push_subscription")
     action = event.get("action", "")
     try:
-        if action == "register" and subscription:
+        if action in {"register", "reregister"}:
+            subscription = event.get("subscription")
+            canonicalize_subscription(subscription)
+            session.pop("web_push_flash_success", None)
+            if action == "reregister":
+                old = event.get("unsubscribed_subscription") or previous_subscription
+                if old and old.get("endpoint") == subscription.get("endpoint"):
+                    raise PushSubscriptionError("알림 재등록에 실패했습니다. 브라우저 알림 권한 및 연결 상태를 확인해 주세요.")
             registerer(kakao_user_id, subscription)
             session["web_push_db_ownership"] = OWNERSHIP_CURRENT
-            session["web_push_flash_success"] = "이 기기의 알림 등록이 완료되었습니다."
+            session.pop("web_push_db_status_error", None)
+            session["web_push_flash_success"] = (
+                "기기 알림이 다시 등록되었습니다." if action == "reregister"
+                else "이 기기의 알림 등록이 완료되었습니다."
+            )
             if on_data_changed is not None:
                 on_data_changed()
             return True
+        if action == "inspect_missing":
+            session.pop("web_push_subscription", None)
+            session["web_push_db_ownership"] = OWNERSHIP_NONE
+            return bool(previous_subscription)
         if action == "inspect" and subscription:
-            if session.get("web_push_db_ownership") != DB_UNKNOWN:
-                return False
             ownership = ownership_loader(kakao_user_id, subscription)
             changed = session.get("web_push_db_ownership") != ownership
             session["web_push_db_ownership"] = ownership
@@ -301,9 +351,18 @@ def handle_web_push_event(
         if action == "unsubscribe_all_browser":
             session["web_push_db_ownership"] = OWNERSHIP_NONE
             return False
+    except PushSubscriptionExpiredError as exc:
+        session.pop("web_push_flash_success", None)
+        session["web_push_db_ownership"] = OWNERSHIP_EXPIRED
+        session["web_push_db_status_error"] = str(exc)
+        return True
     except PushSubscriptionError as exc:
         session["web_push_db_ownership"] = DB_UNAVAILABLE
-        session["web_push_db_status_error"] = str(exc)
+        session.pop("web_push_flash_success", None)
+        session["web_push_db_status_error"] = (
+            "알림 재등록에 실패했습니다. 브라우저 알림 권한 및 연결 상태를 확인해 주세요."
+            if action == "reregister" else str(exc)
+        )
         return True
     return False
 
@@ -323,11 +382,12 @@ def render_web_push_poc(
         st.session_state["web_push_owner_context"] = kakao_user_id
         st.session_state["web_push_db_ownership"] = DB_UNKNOWN
         st.session_state.pop("web_push_last_action_id", None)
+        st.session_state.pop("web_push_processed_actions", None)
         st.session_state.pop("web_push_confirm_deactivate_all", None)
         st.session_state.pop("web_push_unsubscribe_all_action_id", None)
 
     cached_subscription = st.session_state.get("web_push_subscription")
-    if cached_subscription and st.session_state.get("web_push_db_ownership") == DB_UNKNOWN:
+    if cached_subscription:
         try:
             st.session_state["web_push_db_ownership"] = subscription_ownership(
                 kakao_user_id, cached_subscription
@@ -355,6 +415,7 @@ def render_web_push_poc(
         result = component(
             key="web_push_browser_bridge",
             data={
+                "owner_context": kakao_user_id,
                 "public_key": config.public_key,
                 "config_ready": config.ready,
                 "service_worker_url": service_worker_url,

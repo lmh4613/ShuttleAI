@@ -185,7 +185,7 @@ def run_scheduled_push_test_cycle(
             def expire_device(device=device):
                 nonlocal expired
                 expired = True
-                deactivate_push_device(device.id, test.user_id)
+                return deactivate_push_device(device.id, test.user_id)
 
             try:
                 ok, _message = push_sender(
@@ -196,6 +196,7 @@ def run_scheduled_push_test_cycle(
                     config.click_url,
                     expired_handler=expire_device,
                     urgency=test.urgency,
+                    delivery_source="scheduled_test", subscription_id=device.id,
                     include_received_time=True,
                 )
                 if ok:
@@ -361,7 +362,7 @@ def run_notification_cycle(
                 def expire_device(device=device):
                     nonlocal expired
                     expired = True
-                    deactivate_push_device(device.id, target.user_id)
+                    return deactivate_push_device(device.id, target.user_id)
 
                 try:
                     ok, _message = push_sender(
@@ -369,6 +370,7 @@ def run_notification_cycle(
                         config.click_url,
                         expired_handler=expire_device,
                         urgency="high",
+                        delivery_source="automatic", subscription_id=device.id,
                     )
                     if ok:
                         delivered = True

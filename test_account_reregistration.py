@@ -35,6 +35,8 @@ class Cursor:
         return (sql.replace('%s', '?').replace(' FOR UPDATE', '')
                 .replace('ON CONFLICT ON CONSTRAINT uq_favorites_selection',
                          'ON CONFLICT (user_id, route_id, boarding_route_stop_id, alighting_route_stop_id)')
+                .replace('UPDATE push_subscriptions ps ', 'UPDATE push_subscriptions AS ps ')
+                .replace('RETURNING ps.id', 'RETURNING id')
                 .replace('UPDATE favorite_notifications fn ',
                          'UPDATE favorite_notifications AS fn '))
 
@@ -87,6 +89,8 @@ class Database:
                 endpoint TEXT, endpoint_hash TEXT UNIQUE, p256dh TEXT, auth TEXT,
                 expiration_time TEXT, enabled BOOLEAN, last_seen_at TEXT,
                 owner_changed_at TEXT, revoked_at TEXT);
+            CREATE TABLE notification_deliveries (push_subscription_id INTEGER, error_code TEXT);
+            CREATE TABLE scheduled_push_test_deliveries (push_subscription_id INTEGER, error_code TEXT);
             INSERT INTO regions VALUES(1, 'seoul');
             INSERT INTO routes VALUES(22, 1, '출근 테스트', 'morning', TRUE);
             INSERT INTO stops VALUES(1, '탑승 A', 37.1, 127.1, TRUE);

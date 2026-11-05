@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 import logging
 from collections.abc import Callable, Mapping, MutableMapping
 from dataclasses import dataclass
@@ -158,6 +159,8 @@ def send_web_push(
     sender: Callable | None = None,
     expired_handler: Callable[[], None] | None = None,
     urgency: str | None = None,
+    delivery_source: str = "manual",
+    subscription_id: int | None = None,
     include_received_time: bool = False,
 ) -> tuple[bool, str]:
     """Send one validated payload without logging subscription secrets."""
@@ -196,14 +199,25 @@ def send_web_push(
         return True, "Push 알림을 발송했습니다. 운영체제 알림 영역을 확인해 주세요."
     except Exception as exc:
         status_code = getattr(exc, "status_code", None)
+        if status_code is None:
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
         logger.warning("Web Push send failed status=%s type=%s", status_code, type(exc).__name__)
         if status_code in {404, 410}:
+            deactivated = False
+            internal_id = subscription_id
             if expired_handler is not None:
                 try:
-                    expired_handler()
+                    result = expired_handler()
+                    deactivated = bool(result)
+                    if internal_id is None and type(result) is int:
+                        internal_id = result
                 except Exception as handler_exc:
-                    logger.warning(
-                        "Expired Push cleanup failed type=%s", type(handler_exc).__name__
-                    )
-            return False, "브라우저 구독이 만료되었습니다. 이 기기 알림을 해제한 뒤 다시 등록해 주세요."
+                    logger.warning("Expired Push cleanup failed type=%s", type(handler_exc).__name__)
+            logger.warning(
+                "Push expiry http_status=%s subscription_id=%s occurred_at=%s source=%s deactivated=%s",
+                status_code, internal_id, datetime.now(timezone.utc).isoformat(),
+                delivery_source if delivery_source in {"automatic", "scheduled_test", "manual"} else "manual",
+                deactivated,
+            )
+            return False, "브라우저 구독이 만료되었습니다. 기기 알림 영역의 알림 다시 등록 버튼을 눌러 주세요."
         return False, "Push 알림 발송에 실패했습니다. VAPID 설정과 네트워크 연결을 확인해 주세요."
