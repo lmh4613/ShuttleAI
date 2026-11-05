@@ -340,7 +340,7 @@ def deactivate_push_device(
         with transaction_factory() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
-                    "UPDATE push_subscriptions SET enabled=FALSE, revoked_at=now() "
+                    "UPDATE push_subscriptions SET enabled=FALSE, revoked_at=now(), expiration_time=now() "
                     "WHERE id=%s AND user_id=%s AND enabled=TRUE RETURNING id",
                     (subscription_id, user_id),
                 )

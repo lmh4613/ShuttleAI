@@ -19,6 +19,7 @@ from push_subscription_store import (
     OWNERSHIP_CURRENT,
     PushSubscriptionError,
     mark_subscription_expired,
+    current_subscription_id,
 )
 from web_push import WEB_PUSH_TTL_SECONDS, load_web_push_config, send_web_push
 from web_push_ui import can_send_weather_push, render_web_push_poc
@@ -1223,24 +1224,32 @@ with main_tab_target:
 
                     def expire_current_subscription():
                         try:
-                            mark_subscription_expired(user_id, subscription)
+                            expired_id = mark_subscription_expired(user_id, subscription)
                         except PushSubscriptionError:
-                            logger.warning("Expired current browser Push cleanup failed")
-                        st.session_state["web_push_db_ownership"] = "none"
+                            st.session_state["web_push_db_ownership"] = "unavailable"
+                            raise
+                        st.session_state["web_push_db_ownership"] = "expired"
                         invalidate_user_screen_data(st.session_state, user_id)
+                        return expired_id
 
-                    ok, message = send_web_push(
-                        subscription,
-                        WEB_PUSH_CONFIG,
-                        weather_message.title,
-                        weather_message.body,
-                        st.session_state.get("web_push_click_url", ""),
-                        expired_handler=expire_current_subscription,
-                    )
-                    if ok:
-                        st.success(message)
+                    try:
+                        push_subscription_id = current_subscription_id(user_id, subscription)
+                    except PushSubscriptionError as exc:
+                        st.error(str(exc))
                     else:
-                        st.error(message)
+                        ok, message = send_web_push(
+                            subscription,
+                            WEB_PUSH_CONFIG,
+                            weather_message.title,
+                            weather_message.body,
+                            st.session_state.get("web_push_click_url", ""),
+                            expired_handler=expire_current_subscription,
+                            delivery_source="manual", subscription_id=push_subscription_id,
+                        )
+                        if ok:
+                            st.success(message)
+                        else:
+                            st.error(message)
                 if st.session_state["user_info"] and not st.session_state["preview_user"]:
                     if st.session_state.get("web_push_db_ownership") != OWNERSHIP_CURRENT:
                         st.caption("이 기기 알림을 먼저 등록해 주세요.")

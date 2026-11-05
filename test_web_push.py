@@ -262,7 +262,8 @@ def test_push_inspect_reruns_only_when_ownership_changes_and_unsubscribe_invalid
     assert handle_web_push_event(session, 101, inspect, ownership_loader=ownership)
     same_state = {**inspect, "action_id": "inspect-2"}
     assert not handle_web_push_event(session, 101, same_state, ownership_loader=ownership)
-    ownership.assert_called_once_with(101, VALID_SUBSCRIPTION)
+    assert ownership.call_count == 2
+    ownership.assert_called_with(101, VALID_SUBSCRIPTION)
 
     deactivate = Mock()
     invalidate = Mock()

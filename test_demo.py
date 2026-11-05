@@ -425,7 +425,8 @@ class AppFlowTests(unittest.TestCase):
                 def handle(session, uid, event, **kwargs):
                     return handle_web_push_event(session, uid, event,
                         ownership_loader=lambda *_: "none", **kwargs)
-                with patch("web_push_ui._register_components", return_value=(bridge, "/sw.js", "/")), \
+                with patch("web_push_ui.subscription_ownership", return_value="none"), \
+                     patch("web_push_ui._register_components", return_value=(bridge, "/sw.js", "/")), \
                      patch("web_push_ui.handle_web_push_event", side_effect=handle):
                     app = self.login(12345)
                     self.assert_notice(app, kind)

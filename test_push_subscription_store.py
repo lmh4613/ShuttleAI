@@ -63,16 +63,17 @@ class MemoryCursor:
                 "p256dh": p256dh, "auth": auth, "expiration": expiration,
                 "enabled": True, "revoked": False,
             }
-            self.result = None
+            self.result = (row_id,)
         elif sql.startswith("SELECT u.kakao_user_id"):
             endpoint_hash = params[0]
             row = self.database.rows.get(endpoint_hash)
-            if row and row["enabled"]:
+            if row:
                 kakao_user_id = next(
                     key for key, user_id in self.database.users.items()
                     if user_id == row["user_id"]
                 )
-                self.result = (kakao_user_id,)
+                self.result = (kakao_user_id, row["enabled"], "revoked" if row["revoked"] else None,
+                               row["expiration"] is not None and row["expiration"] <= datetime.now(timezone.utc), True)
             else:
                 self.result = None
         elif sql.startswith("SELECT count(*) FROM push_subscriptions"):
