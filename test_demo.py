@@ -522,6 +522,43 @@ class AppFlowTests(unittest.TestCase):
         self.assertFalse(any(b.label == "회원 탈퇴" for b in app.button))
         self.repository_mocks["deactivate_user_account"].assert_not_called()
 
+    def test_admin_access_requires_kakao_identity(self):
+        app = self.AppTest.from_string(self.source).run(timeout=15)
+        self.assertEqual(len(app.exception), 0)
+        self.assertFalse(app.session_state["is_admin"])
+        self.assertFalse(any("관리자 로그인" in e.label for e in app.expander))
+        self.assertFalse(any("비밀번호" in e.label for e in app.text_input))
+        self.assertFalse(any(b.label == "로그인" for b in app.button))
+        # A leftover password-login flag must not grant access after an upgrade.
+        app.session_state["is_admin"] = True
+        app.session_state["admin_view_mode"] = "admin"
+        app.run()
+        self.assertEqual(len(app.exception), 0)
+        self.assertFalse(app.session_state["is_admin"])
+        self.assertFalse(any(r.key == "admin_view_mode" for r in app.radio))
+        self.route_mocks["load_admin_route_snapshot"].assert_not_called()
+
+        user = self.login(12345)
+        user.session_state["is_admin"] = True
+        user.run()
+        self.assertFalse(user.session_state["is_admin"])
+        self.assertFalse(any(r.key == "admin_view_mode" for r in user.radio))
+
+    def test_kakao_admin_logout_clears_access(self):
+        for logout_key in ("sidebar_logout", "mobile_logout"):
+            with self.subTest(logout_key=logout_key):
+                app = self.login(5070327065)
+                self.assertTrue(app.session_state["is_admin"])
+                self.open_admin_management(app)
+                self.assertTrue(any(e.label == "🔔 알림 발송 이력" for e in app.expander))
+                app.button(key=logout_key).click().run()
+                self.assertEqual(len(app.exception), 0)
+                self.assertIsNone(app.session_state["user_info"])
+                self.assertFalse(app.session_state["is_admin"])
+                self.assertFalse(app.session_state["preview_user"])
+                app.run()
+                self.assertFalse(any(r.key == "admin_view_mode" for r in app.radio))
+
     def test_admin_preview_and_return(self):
         app = self.login(5070327065)
         before = self.selection_snapshot(app)
