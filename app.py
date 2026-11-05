@@ -587,7 +587,6 @@ if ("code" in query_params or "error" in query_params) and st.session_state["use
                         st.session_state["user_info"] = {
                             "id": kakao_id, "nickname": nickname,
                             "access_token": access_token, "refresh_token": refresh_token}
-                        st.session_state["is_admin"] = kakao_id in [5070327065]
                         st.session_state["preview_user"] = False
                         st.session_state.pop("account_created_flash", None)
                         st.session_state.pop("account_reactivated_flash", None)
@@ -602,6 +601,9 @@ if ("code" in query_params or "error" in query_params) and st.session_state["use
             else:
                 st.session_state["login_error"] = "카카오 로그인에 연결하지 못했습니다. 인터넷 연결을 확인하고 다시 로그인해 주세요."
     st.rerun()
+
+# Admin access requires the existing Kakao identity, including on reruns.
+st.session_state["is_admin"] = (st.session_state["user_info"] or {}).get("id") in [5070327065]
 
 # Load the route source of truth once per Streamlit session.
 route_load_error = None
@@ -686,24 +688,14 @@ def render_account_notice():
 
 
 login_links = []
-# 사이드바: 로그인 및 관리자 인증
+# 사이드바: 카카오 로그인 및 관리자 모드
 with st.sidebar:
     st.subheader("🔐 사용자 인증")
-    if st.session_state["user_info"] is None and not st.session_state["is_admin"]:
+    if st.session_state["user_info"] is None:
         st.info("💡 카카오 로그인을 통해 즐겨찾기 및 알림 기능을 이용하세요.")
         login_links.append(st.empty())
         if st.session_state.get("login_error"):
             st.error(st.session_state["login_error"])
-        st.divider()
-        with st.expander("👑 관리자 로그인"):
-            admin_pw = st.text_input("관리자 비밀번호", type="password")
-            if st.button("로그인", width='stretch'):
-                if admin_pw == "admin1234":
-                    st.session_state["is_admin"] = True
-                    st.success("관리자 로그인 성공!")
-                    st.rerun()
-                else:
-                    st.error("비밀번호가 틀렸습니다.")
     else:
         if st.session_state["user_info"]:
             st.success(f"👋 **{st.session_state['user_info']['nickname']}**님 환영합니다!")
@@ -722,9 +714,6 @@ with st.sidebar:
                         k: st.session_state[k] for k in SELECTION_KEYS if k in st.session_state}
                     st.session_state["preview_user"] = True
                     st.rerun()
-            if st.session_state["user_info"] is None:
-                st.info("즐겨찾기와 메시지 시연에는 카카오 로그인이 필요합니다.")
-                login_links.append(st.empty())
         if st.button("로그아웃", key="sidebar_logout", width='stretch'):
             logout_user_session()
         if st.session_state["user_info"] and not st.session_state["preview_user"]:
