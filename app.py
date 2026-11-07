@@ -798,6 +798,8 @@ if admin_container is not None:
                 }[value],
                 key="admin_global_notification_policy",
             )
+            if selected_global_policy == "KAKAO":
+                st.warning("카카오톡 '나에게 보내기' 방식은 메시지가 전송되지만 별도의 소리·진동·푸시 알림이 발생하지 않습니다. 실제 알림을 받으려면 Web Push를 선택해 주세요.")
             if admin_actor_id is None:
                 st.caption("전역 정책 변경에는 DB에 등록된 카카오 관리자 로그인이 필요합니다.")
             if st.button(
@@ -1269,6 +1271,8 @@ with main_tab_target:
                         key=f"user_delivery_channel_{notification_settings['user_id']}",
                         disabled=st.session_state["preview_user"],
                     )
+                    if selected_channel == "KAKAO":
+                        st.warning("카카오톡 '나에게 보내기' 방식은 메시지가 전송되지만 별도의 소리·진동·푸시 알림이 발생하지 않습니다. 실제 알림을 받으려면 Web Push를 선택해 주세요.")
                     if selected_channel == "PUSH" and notification_settings["active_push_devices"] == 0:
                         st.info("Web Push를 사용하려면 알림을 받을 기기를 먼저 등록해 주세요.")
 

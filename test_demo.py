@@ -798,6 +798,24 @@ class AppFlowTests(unittest.TestCase):
         self.assertEqual(dashboard_loader.call_count, 3)
         self.assertEqual(self.favorite_records, [])
 
+    def test_kakao_notice_follows_channel_selection_without_saving(self):
+        notice = "카카오톡 '나에게 보내기' 방식은 메시지가 전송되지만 별도의 소리·진동·푸시 알림이 발생하지 않습니다. 실제 알림을 받으려면 Web Push를 선택해 주세요."
+        app = self.login(12345)
+        self.assertTrue(any(item.value == notice for item in app.warning))
+        app.radio(key="user_delivery_channel_11").set_value("PUSH").run()
+        self.assertFalse(any(item.value == notice for item in app.warning))
+        app.radio(key="user_delivery_channel_11").set_value("KAKAO").run()
+        self.assertTrue(any(item.value == notice for item in app.warning))
+        self.repository_mocks["update_notification_settings"].assert_not_called()
+
+        admin = self.login(5070327065)
+        self.open_admin_management(admin)
+        for policy in ("AUTO", "KAKAO", "PUSH", "KAKAO", "AUTO"):
+            admin.selectbox(key="admin_global_notification_policy").select(policy).run()
+            self.assertEqual(len(admin.exception), 0)
+            self.assertEqual(any(item.value == notice for item in admin.warning), policy == "KAKAO")
+        self.repository_mocks["update_global_notification_policy"].assert_not_called()
+
     def test_admin_global_policy_ui_calls_authorized_repository_service(self):
         app = self.login(5070327065)
         self.open_admin_management(app)
