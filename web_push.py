@@ -5,6 +5,10 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 import logging
+import time
+from email.utils import parsedate_to_datetime
+
+from requests.exceptions import ConnectionError, Timeout
 from collections.abc import Callable, Mapping, MutableMapping
 from dataclasses import dataclass
 from urllib.parse import urlparse
@@ -86,6 +90,36 @@ def valid_click_url(value: str) -> bool:
 
 WEB_PUSH_TTL_SECONDS = 60
 WEB_PUSH_URGENCIES = {"normal", "high"}
+WEB_PUSH_RETRY_DELAY_SECONDS = 1
+WEB_PUSH_MAX_RETRY_DELAY_SECONDS = 2
+WEB_PUSH_SEND_BUDGET_SECONDS = 15
+
+
+def _retry_delay(exc: Exception) -> float | None:
+    # Only a definite HTTP rejection is eligible; transport outcomes are uncertain.
+    if isinstance(exc, (Timeout, ConnectionError, OSError)):
+        return None
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    if status not in {429, 500, 502, 503, 504}:
+        return None
+    value = getattr(response, "headers", {}).get("Retry-After")
+    if value is None:
+        return WEB_PUSH_RETRY_DELAY_SECONDS if status != 429 else None
+    try:
+        value = str(value).strip()
+        if value.isascii() and value.isdigit():
+            delay = int(value)
+        else:
+            retry_at = parsedate_to_datetime(value)
+            if retry_at.tzinfo is None:
+                return None
+            delay = (retry_at - datetime.now(timezone.utc)).total_seconds()
+    except (ValueError, TypeError, OverflowError):
+        return None
+    if 0 <= delay <= WEB_PUSH_MAX_RETRY_DELAY_SECONDS:
+        return max(WEB_PUSH_RETRY_DELAY_SECONDS, delay)
+    return None
 
 
 def build_push_payload(
@@ -181,43 +215,56 @@ def send_web_push(
 
     target_url = config.click_url or click_url
     headers = {"Urgency": urgency} if urgency is not None else None
-    try:
-        kwargs = dict(
-            subscription_info=normalized,
-            data=build_push_payload(
-                title, body, target_url,
-                include_received_time=include_received_time,
-            ),
-            vapid_private_key=config.private_key,
-            vapid_claims={"sub": config.subject},
-            ttl=WEB_PUSH_TTL_SECONDS,
-            timeout=15,
-        )
-        if headers is not None:
-            kwargs["headers"] = headers
-        sender(**kwargs)
-        return True, "Push 알림을 발송했습니다. 운영체제 알림 영역을 확인해 주세요."
-    except Exception as exc:
-        status_code = getattr(exc, "status_code", None)
-        if status_code is None:
-            status_code = getattr(getattr(exc, "response", None), "status_code", None)
-        logger.warning("Web Push send failed status=%s type=%s", status_code, type(exc).__name__)
-        if status_code in {404, 410}:
-            deactivated = False
-            internal_id = subscription_id
-            if expired_handler is not None:
-                try:
-                    result = expired_handler()
-                    deactivated = bool(result)
-                    if internal_id is None and type(result) is int:
-                        internal_id = result
-                except Exception as handler_exc:
-                    logger.warning("Expired Push cleanup failed type=%s", type(handler_exc).__name__)
-            logger.warning(
-                "Push expiry http_status=%s subscription_id=%s occurred_at=%s source=%s deactivated=%s",
-                status_code, internal_id, datetime.now(timezone.utc).isoformat(),
-                delivery_source if delivery_source in {"automatic", "scheduled_test", "manual"} else "manual",
-                deactivated,
+    source = delivery_source if delivery_source in {"automatic", "scheduled_test", "manual"} else "manual"
+    started = time.monotonic()
+    for attempt in range(2):
+        try:
+            kwargs = dict(
+                subscription_info=normalized,
+                data=build_push_payload(
+                    title, body, target_url,
+                    include_received_time=include_received_time,
+                ),
+                vapid_private_key=config.private_key,
+                vapid_claims={"sub": config.subject},
+                ttl=WEB_PUSH_TTL_SECONDS,
+                timeout=15 if attempt == 0 else remaining,
             )
-            return False, "브라우저 구독이 만료되었습니다. 기기 알림 영역의 알림 다시 등록 버튼을 눌러 주세요."
-        return False, "Push 알림 발송에 실패했습니다. VAPID 설정과 네트워크 연결을 확인해 주세요."
+            if headers is not None:
+                kwargs["headers"] = headers
+            response = sender(**kwargs)
+            logger.info("Web Push final http_status=%s source=%s retries=%s success=True",
+                        getattr(response, "status_code", None), source, attempt)
+            return True, "Push 알림을 발송했습니다. 운영체제 알림 영역을 확인해 주세요."
+        except Exception as exc:
+            status_code = getattr(exc, "status_code", None)
+            if status_code is None:
+                status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            delay = _retry_delay(exc) if attempt == 0 else None
+            if delay is not None and time.monotonic() - started + delay < WEB_PUSH_SEND_BUDGET_SECONDS:
+                logger.info("Web Push retry http_status=%s source=%s retries=1", status_code, source)
+                time.sleep(delay)
+                remaining = WEB_PUSH_SEND_BUDGET_SECONDS - (time.monotonic() - started)
+                if remaining > 0:
+                    continue
+            logger.warning("Web Push final http_status=%s source=%s retries=%s success=False",
+                           status_code, source, attempt)
+            if status_code in {404, 410}:
+                deactivated = False
+                internal_id = subscription_id
+                if expired_handler is not None:
+                    try:
+                        result = expired_handler()
+                        deactivated = bool(result)
+                        if internal_id is None and type(result) is int:
+                            internal_id = result
+                    except Exception as handler_exc:
+                        logger.warning("Expired Push cleanup failed type=%s", type(handler_exc).__name__)
+                logger.warning(
+                    "Push expiry http_status=%s subscription_id=%s occurred_at=%s source=%s deactivated=%s",
+                    status_code, internal_id, datetime.now(timezone.utc).isoformat(),
+                    delivery_source if delivery_source in {"automatic", "scheduled_test", "manual"} else "manual",
+                    deactivated,
+                )
+                return False, "브라우저 구독이 만료되었습니다. 기기 알림 영역의 알림 다시 등록 버튼을 눌러 주세요."
+            return False, "Push 알림 발송에 실패했습니다. VAPID 설정과 네트워크 연결을 확인해 주세요."
