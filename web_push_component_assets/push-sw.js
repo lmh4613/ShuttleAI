@@ -41,3 +41,18 @@ self.addEventListener("notificationclick", (event) => {
     })
   );
 });
+
+
+// A hint only: the authenticated page re-reads PushManager and checks DB ownership.
+// No subscription payload, account credentials, registration, or server writes here.
+self.addEventListener("pushsubscriptionchange", (event) => {
+  event.waitUntil(
+    clients.matchAll({ type: "window", includeUncontrolled: true }).then((windows) => {
+      for (const client of windows) {
+        if (new URL(client.url).origin === self.location.origin) {
+          client.postMessage({ type: "shuttle-push-subscription-changed" });
+        }
+      }
+    })
+  );
+});
