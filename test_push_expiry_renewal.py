@@ -32,6 +32,7 @@ def registered(db, suffix):
 @pytest.mark.parametrize('source', ['automatic', 'scheduled_test', 'manual'])
 @pytest.mark.parametrize('status', [404, 410, 429, 500, 503, None])
 def test_delivery_expiry_is_scoped_and_logged(db, monkeypatch, caplog, source, status):
+    monkeypatch.setattr("web_push.time.sleep", Mock())
     login(db)
     old, device = registered(db, 'old')
     other, other_device = registered(db, 'other')
@@ -51,7 +52,7 @@ def test_delivery_expiry_is_scoped_and_logged(db, monkeypatch, caplog, source, s
         assert store.current_subscription_id(123, old, connection_factory=db.transaction) == device.id
         sender(old, CONFIG, 'title', 'body', '', subscription_id=device.id,
                expired_handler=lambda: store.mark_subscription_expired(123, old, transaction_factory=db.transaction))
-    assert transport.call_count == 1
+    assert transport.call_count == (2 if status in (500, 503) else 1)
     expired = status in (404, 410)
     assert db.raw.execute('SELECT enabled FROM push_subscriptions WHERE id=?', (device.id,)).fetchone() == (int(not expired),)
     assert store.subscription_ownership(123, other, connection_factory=db.transaction) == 'current'

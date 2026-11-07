@@ -279,3 +279,157 @@ def test_push_inspect_reruns_only_when_ownership_changes_and_unsubscribe_invalid
     deactivate.assert_called_once_with(101, VALID_SUBSCRIPTION)
     invalidate.assert_called_once()
     assert session["web_push_db_ownership"] == "none"
+
+
+# Retry policy tests use explicit HTTP responses, never live Push services.
+def http_failure(status, retry_after=None):
+    from requests import Response
+    from pywebpush import WebPushException
+    response = Response()
+    response.status_code = status
+    if retry_after is not None:
+        response.headers["Retry-After"] = retry_after
+    return WebPushException("private response body", response=response)
+
+
+@pytest.fixture
+def retry_clock(monkeypatch):
+    import web_push
+    clock = [0.0]
+    sleep = Mock(side_effect=lambda delay: clock.__setitem__(0, clock[0] + delay))
+    monkeypatch.setattr(web_push.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(web_push.time, "sleep", sleep)
+    return clock, sleep
+
+
+@pytest.mark.parametrize("status", [500, 502, 503, 504])
+@pytest.mark.parametrize("source", ["automatic", "scheduled_test", "manual"])
+def test_transient_http_retry_success(status, source, retry_clock, caplog):
+    caplog.set_level("INFO", logger="web_push")
+    sender = Mock(side_effect=[http_failure(status), None])
+    expired = Mock()
+    ok, _ = send_web_push(VALID_SUBSCRIPTION, ready_config(), "title", "body",
+                         sender=sender, expired_handler=expired, delivery_source=source)
+    assert ok and sender.call_count == 2
+    retry_clock[1].assert_called_once_with(1)
+    expired.assert_not_called()
+    assert sender.call_args_list[0].kwargs["data"] == sender.call_args_list[1].kwargs["data"]
+    assert sender.call_args_list[1].kwargs["timeout"] == 14
+    assert f"http_status={status} source={source} retries=1" in caplog.text
+    assert f"source={source} retries=1 success=True" in caplog.text
+    for secret in ("private response body", VALID_SUBSCRIPTION["endpoint"], "auth-secret", "private-vapid-key"):
+        assert secret not in caplog.text
+
+
+@pytest.mark.parametrize("second", [503, 410, 429])
+def test_retry_stops_after_second_failure(second, retry_clock, caplog):
+    sender = Mock(side_effect=[http_failure(500), http_failure(second)])
+    expired = Mock(return_value=True)
+    ok, _ = send_test_push(VALID_SUBSCRIPTION, ready_config(), sender=sender, expired_handler=expired)
+    assert not ok and sender.call_count == 2
+    assert expired.call_count == (1 if second == 410 else 0)
+    assert f"http_status={second} source=manual retries=1 success=False" in caplog.text
+
+
+@pytest.mark.parametrize("header,expected", [(None, 1), ("0", 2), ("1", 2), ("2", 2),
+                                           ("3", 1), ("3600", 1), ("bad", 1), ("-1", 1), ("NaN", 1)])
+def test_429_requires_short_valid_retry_after(header, expected, retry_clock):
+    sender = Mock(side_effect=[http_failure(429, header), None])
+    ok, _ = send_test_push(VALID_SUBSCRIPTION, ready_config(), sender=sender)
+    assert sender.call_count == expected
+    assert ok == (expected == 2)
+    assert retry_clock[1].call_count == expected - 1
+
+
+@pytest.mark.parametrize("offset,expected", [(1, 2), (30, 1), (-30, 1)])
+def test_retry_after_http_date(offset, expected, retry_clock, monkeypatch):
+    from datetime import datetime, timezone, timedelta
+    from email.utils import format_datetime
+    fixed = datetime(2026, 11, 7, tzinfo=timezone.utc)
+    monkeypatch.setattr("web_push.datetime", Mock(now=Mock(return_value=fixed)))
+    sender = Mock(side_effect=[http_failure(429, format_datetime(fixed + timedelta(seconds=offset))), None])
+    send_test_push(VALID_SUBSCRIPTION, ready_config(), sender=sender)
+    assert sender.call_count == expected
+
+
+@pytest.mark.parametrize("status", [401, 403, 404, 410, 400, 501])
+def test_permanent_http_errors_do_not_retry(status, retry_clock):
+    sender = Mock(side_effect=http_failure(status, "1"))
+    expired = Mock(return_value=True)
+    ok, _ = send_test_push(VALID_SUBSCRIPTION, ready_config(), sender=sender, expired_handler=expired)
+    assert not ok
+    sender.assert_called_once()
+    retry_clock[1].assert_not_called()
+    assert expired.call_count == (1 if status in {404, 410} else 0)
+
+
+@pytest.mark.parametrize("kind", ["timeout", "connection", "unknown", "status_only"])
+def test_uncertain_transport_never_retries(kind, retry_clock):
+    from requests.exceptions import Timeout, ConnectionError
+    errors = {"timeout": Timeout("secret"), "connection": ConnectionError("secret"),
+              "unknown": RuntimeError("secret"), "status_only": RuntimeError("secret")}
+    error = errors[kind]
+    if kind == "status_only":
+        error.status_code = 503
+    sender = Mock(side_effect=error)
+    ok, _ = send_test_push(VALID_SUBSCRIPTION, ready_config(), sender=sender)
+    assert not ok
+    sender.assert_called_once()
+    retry_clock[1].assert_not_called()
+
+
+def test_slow_first_request_and_long_server_retry_after_do_not_wait(retry_clock):
+    clock, sleep = retry_clock
+    def slow(**kwargs):
+        clock[0] += 14
+        raise http_failure(503)
+    sender = Mock(side_effect=slow)
+    assert not send_test_push(VALID_SUBSCRIPTION, ready_config(), sender=sender)[0]
+    sender.assert_called_once()
+    sleep.assert_not_called()
+    sender = Mock(side_effect=http_failure(503, "120"))
+    assert not send_test_push(VALID_SUBSCRIPTION, ready_config(), sender=sender)[0]
+    sender.assert_called_once()
+    sleep.assert_not_called()
+
+
+@pytest.mark.parametrize("source", ["automatic", "scheduled_test"])
+def test_retry_records_only_final_device_result_and_preserves_claims(source, retry_clock):
+    from test_notification_worker import (History, ScheduledHistory, cycle, run_scheduled,
+                                          target, device, scheduled_test)
+    transports = {1: Mock(side_effect=[http_failure(503), None]),
+                  2: Mock(side_effect=[http_failure(500), http_failure(503)])}
+    def sender(sub, config, title, body, url, **kwargs):
+        return send_web_push(sub, config, title, body, url,
+                             sender=transports[kwargs["subscription_id"]], **kwargs)
+    if source == "automatic":
+        history = History()
+        for _ in range(2):
+            cycle([target(devices=[device(1), device(2)])], push_sender=sender, history=history)
+    else:
+        history = ScheduledHistory(tests=[scheduled_test()], devices=[device(1), device(2)])
+        for _ in range(2):
+            run_scheduled(history, sender=sender)
+    assert [d["status"] for d in history.deliveries] == ["SUCCESS", "FAILED"]
+    assert len(history.deliveries) == 2
+    assert all(t.call_count == 2 for t in transports.values())
+
+
+def test_first_success_does_not_sleep_or_retry(retry_clock, caplog):
+    from requests import Response
+    response = Response()
+    response.status_code = 201
+    sender = Mock(return_value=response)
+    caplog.set_level("INFO", logger="web_push")
+    assert send_test_push(VALID_SUBSCRIPTION, ready_config(), sender=sender)[0]
+    sender.assert_called_once()
+    retry_clock[1].assert_not_called()
+    assert "http_status=201 source=manual retries=0 success=True" in caplog.text
+
+
+def test_budget_exhausted_during_sleep_prevents_resend(retry_clock):
+    clock, sleep = retry_clock
+    sleep.side_effect = lambda delay: clock.__setitem__(0, 16)
+    sender = Mock(side_effect=http_failure(503))
+    assert not send_test_push(VALID_SUBSCRIPTION, ready_config(), sender=sender)[0]
+    sender.assert_called_once()
