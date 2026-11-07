@@ -132,7 +132,18 @@ export default function(component) {
     return registration;
   }
 
+  let disposed = false;
+  let inspecting = false;
+  let missingReported = false;
+
   function emitEvent(action, state, subscription = null, removed = null) {
+    if (disposed) return;
+    if (action === 'inspect_missing') {
+      if (missingReported) return;
+      missingReported = true;
+    } else if (subscription) {
+      missingReported = false;
+    }
     setStateValue('event', {
       action,
       owner_context: data.owner_context,
@@ -145,21 +156,24 @@ export default function(component) {
   }
 
   function showState(state, subscription = null, action = '', removed = null) {
+    if (disposed) return;
     subscribeButton.hidden = ['registered', 'db_unavailable', 'loading'].includes(state);
-    unsubscribeButton.hidden = !['registered', 'browser_only'].includes(state);
+    unsubscribeButton.hidden = !['registered', 'browser_only', 'revoked'].includes(state);
     subscribeButton.disabled = state === 'denied' || state === 'unsupported' || !data.config_ready;
-    subscribeButton.textContent = state === 'expired' ? '알림 다시 등록' : state === 'browser_only'
+    subscribeButton.textContent = state === 'expired' ? '알림 다시 등록' : ['browser_only', 'other'].includes(state)
       ? '현재 계정에 이 기기 알림 연결' : '이 기기에서 알림 받기';
 
     const labels = {
       loading: '현재 상태: 브라우저 알림 상태를 확인하고 있습니다.',
-      unregistered: '현재 상태: 알림이 등록되지 않았습니다.',
+      unregistered: '현재 브라우저에 알림 구독이 없거나 제거되었습니다. 알림을 받으려면 이 기기를 등록해 주세요.',
       unsubscribed: '현재 상태: 알림이 등록되지 않았습니다.',
       registered: '현재 기기의 알림이 정상적으로 등록되어 있습니다.',
       expired: '이 기기의 알림 구독이 만료되어 알림을 받을 수 없습니다. 아래 버튼을 눌러 다시 등록해 주세요.',
       renewal_failed: '알림 재등록에 실패했습니다. 브라우저 알림 권한 및 연결 상태를 확인해 주세요.',
       renewal_unsupported: '이 브라우저에서는 알림 구독 재발급을 지원하지 않습니다. 브라우저를 업데이트하거나 다른 브라우저를 이용해 주세요.',
-      browser_only: '현재 상태: 브라우저 알림을 현재 계정에 연결해야 합니다.',
+      browser_only: '브라우저 구독이 현재 계정의 DB 등록 상태와 일치하지 않습니다. 아래 버튼으로 현재 계정에 연결해 주세요.',
+      other: '이 브라우저의 구독은 다른 계정에 연결되어 있습니다. 아래 버튼을 누르면 현재 계정으로 연결이 변경됩니다.',
+      revoked: '이 기기의 알림 등록이 해제되어 있습니다. 다시 받으려면 직접 등록해 주세요.',
       db_unavailable: '현재 상태: 기기 알림 등록 정보를 확인할 수 없습니다.',
       denied: '현재 상태: 브라우저에서 알림 권한이 차단되어 있습니다.',
       unsupported: '현재 상태: 이 브라우저에서는 Web Push를 지원하지 않습니다.',
@@ -175,19 +189,35 @@ export default function(component) {
     if (action) emitEvent(action, state, subscription, removed);
   }
 
-  async function inspectState() {
-    if (!supported) return showState('unsupported');
-    if (Notification.permission === 'denied') return showState('denied');
-    const registration = await findRegistration();
-    const subscription = registration ? await registration.pushManager.getSubscription() : null;
-    if (!subscription) return showState('unregistered', null, data.server_endpoint ? 'inspect_missing' : '');
-    if (data.server_state === 'unavailable') return showState('db_unavailable', subscription);
-    if (data.server_state === 'unknown' || subscription.endpoint !== data.server_endpoint) return showState('loading', subscription, 'inspect');
-    if (data.server_state === 'expired') return showState('expired', subscription);
-    showState(
-      data.server_state === 'current' ? 'registered' : 'browser_only',
-      subscription
-    );
+  async function inspectState(refresh = false) {
+    if (disposed || busy || inspecting) return;
+    inspecting = true;
+    try {
+      if (!supported) return showState('unsupported');
+      if (Notification.permission === 'denied') {
+        return showState('denied', null, data.server_endpoint ? 'inspect_missing' : '');
+      }
+      const registration = await findRegistration();
+      if (registration && !refresh && typeof registration.update === 'function') {
+        registration.update().catch(() => {}); // Update the hint handler, never the subscription.
+      }
+      const subscription = registration ? await registration.pushManager.getSubscription() : null;
+      if (!subscription) return showState('unregistered', null, data.server_endpoint ? 'inspect_missing' : '');
+      if (data.server_state === 'unavailable' && !refresh) return showState('db_unavailable', subscription);
+      if (data.server_state === 'unknown' || subscription.endpoint !== data.server_endpoint) {
+        return showState('loading', subscription, 'inspect');
+      }
+      const state = data.server_state === 'unavailable' ? 'db_unavailable'
+        : data.server_state === 'expired' ? 'expired'
+        : data.server_state === 'revoked' ? 'revoked'
+        : ['other', 'other_expired'].includes(data.server_state) ? 'other'
+        : data.server_state === 'current' ? 'registered' : 'browser_only';
+      showState(state, subscription, refresh ? 'inspect' : '');
+    } catch (_error) {
+      showState('error', null, data.server_endpoint ? 'inspect_missing' : '');
+    } finally {
+      inspecting = false;
+    }
   }
 
   async function applyServerUnsubscribe() {
@@ -206,7 +236,7 @@ export default function(component) {
 
   let busy = false;
   subscribeButton.onclick = async () => {
-    if (busy) return;
+    if (disposed || busy || inspecting) return;
     const renewing = ['expired', 'other_expired'].includes(data.server_state);
     if (!supported || !data.config_ready || Notification.permission === 'denied') {
       return inspectState();
@@ -258,9 +288,29 @@ export default function(component) {
     }
   };
 
+  const refresh = () => inspectState(true);
+  const visible = () => { if (window.document?.visibilityState === 'visible') refresh(); };
+  const subscriptionChanged = event => {
+    if (event.data?.type === 'shuttle-push-subscription-changed' &&
+        event.source?.scriptURL === new URL(data.service_worker_url, window.location.origin).href) {
+      refresh();
+    }
+  };
+  window.addEventListener?.('focus', refresh);
+  window.addEventListener?.('pageshow', refresh);
+  window.document?.addEventListener('visibilitychange', visible);
+  navigator.serviceWorker?.addEventListener?.('message', subscriptionChanged);
+
   applyServerUnsubscribe()
     .then(handled => { if (!handled) return inspectState(); })
     .catch(() => showState('error'));
+  return () => {
+    disposed = true;
+    window.removeEventListener?.('focus', refresh);
+    window.removeEventListener?.('pageshow', refresh);
+    window.document?.removeEventListener('visibilitychange', visible);
+    navigator.serviceWorker?.removeEventListener?.('message', subscriptionChanged);
+  };
 }
 """
 
@@ -292,7 +342,7 @@ def handle_web_push_event(
     on_data_changed=None,
 ) -> bool:
     """Process one coherent browser event; return whether server state needs redraw."""
-    if not isinstance(event, dict):
+    if kakao_user_id is None or not isinstance(event, dict):
         return False
     if event.get("owner_context", kakao_user_id) != kakao_user_id:
         return False
@@ -331,12 +381,14 @@ def handle_web_push_event(
                 on_data_changed()
             return True
         if action == "inspect_missing":
+            session.pop("web_push_flash_success", None)
             session.pop("web_push_subscription", None)
             session["web_push_db_ownership"] = OWNERSHIP_NONE
             return bool(previous_subscription)
         if action == "inspect" and subscription:
             ownership = ownership_loader(kakao_user_id, subscription)
-            changed = session.get("web_push_db_ownership") != ownership
+            changed = (session.get("web_push_db_ownership") != ownership
+                       or previous_subscription != subscription)
             session["web_push_db_ownership"] = ownership
             return changed
         if action == "unsubscribe":
@@ -383,6 +435,8 @@ def render_web_push_poc(
         st.session_state["web_push_db_ownership"] = DB_UNKNOWN
         st.session_state.pop("web_push_last_action_id", None)
         st.session_state.pop("web_push_processed_actions", None)
+        st.session_state.pop("web_push_flash_success", None)
+        st.session_state.pop("web_push_db_status_error", None)
         st.session_state.pop("web_push_confirm_deactivate_all", None)
         st.session_state.pop("web_push_unsubscribe_all_action_id", None)
 

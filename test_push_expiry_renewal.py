@@ -196,7 +196,8 @@ if (mode === 'normal') {
     assert.equal(unsubscribed, 0); assert.equal(subscribed, 0);
     assert.equal(events.length, 1); assert.equal(events[0].action, 'register');
   } else {
-    assert.equal(events.length, 0);
+    assert.equal(events.length, mode === 'denied' ? 1 : 0);
+    if (mode === 'denied') assert.equal(events[0].action, 'inspect_missing');
     assert.match(elements['.push-status'].textContent, /실패|지원하지|차단/);
   }
 }
@@ -269,3 +270,121 @@ def test_missing_browser_subscription_clears_stale_session_without_db_mutation()
     assert not handle_web_push_event(session, 123, event, registerer=register, deactivator=deactivate)
     register.assert_not_called()
     deactivate.assert_not_called()
+
+
+@pytest.mark.parametrize('ownership', ['current', 'none', 'other', 'revoked', 'expired'])
+def test_changed_endpoint_requests_redraw_even_with_same_ownership(ownership):
+    old, new = subscription('old-browser'), subscription('new-browser')
+    session = {'web_push_subscription': old, 'web_push_db_ownership': ownership}
+    register, deactivate = Mock(), Mock()
+    event = dict(action='inspect', action_id='changed', owner_context=123,
+                 subscription=new, browser_status='loading')
+    assert handle_web_push_event(session, 123, event, ownership_loader=Mock(return_value=ownership),
+                                 registerer=register, deactivator=deactivate)
+    assert session['web_push_subscription'] == new
+    assert session['web_push_db_ownership'] == ownership
+    assert not handle_web_push_event(session, 123, event, registerer=register, deactivator=deactivate)
+    register.assert_not_called()
+    deactivate.assert_not_called()
+
+
+@pytest.mark.parametrize('uid,event_owner', [(None, None), (None, 123), (456, 123)])
+@pytest.mark.parametrize('action', ['register', 'reregister', 'unsubscribe', 'inspect', 'inspect_missing'])
+def test_logged_out_and_previous_account_events_are_ignored(uid, event_owner, action):
+    session = {}
+    register, deactivate, ownership = Mock(), Mock(), Mock()
+    event = dict(action=action, action_id='stale', owner_context=event_owner,
+                 subscription=subscription())
+    assert not handle_web_push_event(session, uid, event, registerer=register,
+                                     deactivator=deactivate, ownership_loader=ownership)
+    assert session == {}
+    register.assert_not_called()
+    deactivate.assert_not_called()
+    ownership.assert_not_called()
+
+
+def test_live_browser_changes_and_worker_hint_are_read_only(tmp_path):
+    node = shutil.which('node')
+    assert node
+    (tmp_path / 'component.mjs').write_text(_COMPONENT_JS, encoding='utf-8')
+    worker_source = Path('web_push_component_assets/push-sw.js').read_text(encoding='utf-8')
+    (tmp_path / 'worker.js').write_text(worker_source, encoding='utf-8')
+    harness = tmp_path / 'changes.mjs'
+    harness.write_text(r'''
+import component from './component.mjs';
+import assert from 'node:assert/strict';
+import vm from 'node:vm';
+import fs from 'node:fs';
+const listeners = new Map();
+const on = (key, fn) => { if (!listeners.has(key)) listeners.set(key, new Set()); listeners.get(key).add(fn); };
+const off = (key, fn) => listeners.get(key)?.delete(fn);
+const tick = () => new Promise(resolve => setTimeout(resolve, 0));
+const fire = (key, event) => { for (const fn of listeners.get(key) || []) fn(event); };
+const elements = Object.fromEntries(['.push-status','.push-help','.subscribe','.unsubscribe'].map(k => [k, {}]));
+const make = endpoint => ({endpoint, toJSON() {return {endpoint, keys:{p256dh:'p',auth:'a'}}}});
+const old = make('https://example.test/old');
+let current = old;
+let subscribeCount=0, unsubscribeCount=0;
+const events=[];
+const registration={scope:'https://example.test/component/',active:true,pushManager:{
+  async getSubscription(){ return current; },
+  async subscribe(){subscribeCount++;throw Error('should not subscribe');}
+}};
+const sw={async getRegistrations(){return [registration]},
+  addEventListener:(k,f)=>on('sw:'+k,f),removeEventListener:(k,f)=>off('sw:'+k,f)};
+Object.defineProperty(globalThis,'navigator',{value:{serviceWorker:sw}});
+globalThis.window={isSecureContext:true,PushManager:{},Notification:{},
+  location:{origin:'https://example.test',pathname:'/'},
+  addEventListener:on,removeEventListener:off,
+  document:{visibilityState:'visible',addEventListener:on,removeEventListener:off},
+  sessionStorage:{getItem(){return null},setItem(){}}};
+globalThis.Notification={permission:'granted'};
+const data={server_state:'current',server_endpoint:old.endpoint,owner_context:123,
+  config_ready:true,service_worker_scope:'/component/',service_worker_url:'/component/sw.js',public_key:'AQID'};
+const mount=()=>component({data,parentElement:{querySelector:k=>elements[k]},setStateValue:(_k,v)=>events.push(v)});
+let cleanup=mount(); await tick();
+assert.match(elements['.push-status'].textContent,/정상/); assert.equal(events.length,0);
+current=make('https://example.test/new');
+fire('focus');fire('pageshow');await tick();
+assert.equal(events.length,1);assert.equal(events[0].action,'inspect');
+assert.equal(events[0].subscription.endpoint,current.endpoint);
+cleanup();data.server_endpoint=current.endpoint;data.server_state='none';cleanup=mount();await tick();
+assert.match(elements['.push-status'].textContent,/일치하지/);
+assert.equal(subscribeCount,0);assert.equal(unsubscribeCount,0);
+current=null;fire('visibilitychange');await tick();
+assert.equal(events.at(-1).action,'inspect_missing');
+assert.match(elements['.push-status'].textContent,/없거나 제거/);
+cleanup();data.server_endpoint='';cleanup=mount();await tick();
+const before=events.length;
+current=old;
+fire('sw:message',{data:{type:'shuttle-push-subscription-changed'},source:{scriptURL:'https://example.test/wrong.js'}});
+await tick();assert.equal(events.length,before);
+fire('sw:message',{data:{type:'shuttle-push-subscription-changed'},source:{scriptURL:'https://example.test/component/sw.js'}});
+await tick();assert.equal(events.at(-1).action,'inspect');
+cleanup();const ended=events.length;fire('focus');await tick();assert.equal(events.length,ended);
+assert.ok([...listeners.values()].every(set=>set.size===0));
+// No event support or no open tab: a new mount still inspects the real subscription.
+data.server_state='revoked';data.server_endpoint=old.endpoint;cleanup=mount();await tick();
+assert.match(elements['.push-status'].textContent,/해제/);assert.equal(events.length,ended);
+cleanup();data.server_state='other';cleanup=mount();await tick();
+assert.match(elements['.push-status'].textContent,/다른 계정/);assert.equal(events.length,ended);
+cleanup();data.server_state='unavailable';cleanup=mount();await tick();
+fire('focus');await tick();assert.match(elements['.push-status'].textContent,/확인할 수 없/);
+assert.equal(elements['.subscribe'].hidden,true);
+cleanup();Notification.permission='denied';data.server_state='current';cleanup=mount();await tick();
+assert.equal(events.at(-1).action,'inspect_missing');assert.match(elements['.push-status'].textContent,/차단/);
+cleanup();assert.equal(subscribeCount,0);
+const handlers={};const sent=[];
+vm.runInNewContext(fs.readFileSync(new URL('./worker.js',import.meta.url),'utf8'),{
+  URL,self:{location:{origin:'https://example.test'},addEventListener:(k,f)=>handlers[k]=f},
+  clients:{async matchAll(){return [
+    {url:'https://example.test/',postMessage:m=>sent.push(m)},
+    {url:'https://elsewhere.test/',postMessage:()=>assert.fail('foreign client')}
+  ];}}
+});
+let work;
+handlers.pushsubscriptionchange({waitUntil:p=>work=p});await work;
+assert.equal(JSON.stringify(sent),JSON.stringify([{type:'shuttle-push-subscription-changed'}]));
+''', encoding='utf-8')
+    result = subprocess.run([node, str(harness)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
